@@ -1,0 +1,36 @@
+# Visual Studio and other IDE files (remove if not used)
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build output files
+*.exe
+*.obj
+*.o
+*.dll
+*.pdb
+*.ilk
+*.idb
+*.lib
+
+# Logs
+*.log
+
+# MinGW specific
+*.exe
+*.dll
+
+# Notepad++ backup files
+*.bak
+*.backup
+*.tmp
+*.txt
+
+# Windows system files
+Thumbs.db
+Desktop.ini
+
+# Build folders
+build/
