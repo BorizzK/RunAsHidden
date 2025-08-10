@@ -1,5 +1,9 @@
 // RunAsHidden.cpp
 // Version 3.0.8
+// Author: [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk / https://github.com/BorizzK )
+// Forum: https://forum.ru-board.com/topic.cgi?forum=8&topic=82891#1
+// GitHub: https://github.com/BorizzK/RunAsHidden
+// License: MIT
 // APi: https://learn.microsoft.com/ru-ru/windows/win32/api/ | https://learn.microsoft.com/en-us/windows/win32/api/
 // mingw64 [https://winlibs.com/]
 // Compile command without res: 
