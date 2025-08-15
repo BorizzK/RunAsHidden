@@ -1,6 +1,6 @@
 # RunAsHidden
 
-**Version:** 3.0.8.0  
+**Version:** 3.0.9.0  
 **Author:** [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk/)  
 **License:** MIT  
 **Platform:** Windows x64 only
@@ -73,6 +73,7 @@ RunAsHidden.exe ... > result.txt
 
 - [ ] Write to log file along with console output
 - [ ] GUI wrapper (optional)
+- [ ] GUI windows with condole output and/or progress instead console output
 
 ---
 

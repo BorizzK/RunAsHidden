@@ -1,5 +1,5 @@
 // RunAsHidden.cpp
-// Version 3.0.8
+// Version 3.0.9
 // Author: [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk / https://github.com/BorizzK )
 // Forum: https://forum.ru-board.com/topic.cgi?forum=8&topic=82891#1
 // GitHub: https://github.com/BorizzK/RunAsHidden
@@ -9,7 +9,7 @@
 // Compile command without res: 
 // g++ RunAsHidden.cpp -o RunAsHidden.exe -municode -static -ladvapi32 -luserenv -lsecur32 -lversion -lwtsapi32 -lnetapi32
 // Compile command with res:
-// windres RunAsHidden.rc -O coff -o RunAsHidden.res & g++ RunAsHidden.cpp RunAsHidden.res -o RunAsHidden.exe -municode -static -ladvapi32 -luserenv -lsecur32 -lversion -lwtsapi32 -lnetapi32
+// windres RunAsHidden.rc -O coff -o RunAsHidden.res & g++ RunAsHidden.cpp RunAsHidden.res -o RunAsHidden.exe -municode -static -ladvapi32 -luserenv -lsecur32 -lversion -lwtsapi32 -lnetapi32 -lbcrypt
 
 	#ifndef UNICODE
 	#define UNICODE
@@ -17,6 +17,7 @@
 	#define SECURITY_WIN32
 	#define _WIN32_WINNT 0x0601
 	#include <windows.h>
+	//#include <bcrypt.h>
 	#include <winerror.h>
 	#include <ntsecapi.h>
 	#include <userenv.h>
@@ -36,6 +37,8 @@
 	#include <io.h>			// для _setmode, _fileno
 	#include <fcntl.h>		// для _O_U16TEXT
 	#include <algorithm> 	// для std::transform
+	#include <cstdlib>
+	#include <ctime>
 	#ifndef ERROR_USER_PROFILE_ALREADY_LOADED
 	#define ERROR_USER_PROFILE_ALREADY_LOADED 1500
 	#endif
@@ -266,23 +269,48 @@
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
 
+	//****************************************************************************************************//
+
 	std::wstring GenerateRandomString(size_t length) {
-		const wchar_t charset[] = L"abcdefghijklmnopqrstuvwxyz0123456789";
+		const wchar_t charset[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 		std::wstring result;
+		result.reserve(length);
+		srand((unsigned)time(NULL) ^ GetTickCount());
 		for (size_t i = 0; i < length; ++i) {
 			result += charset[rand() % (sizeof(charset)/sizeof(wchar_t) - 1)];
 		}
 		return result;
 	}
 
+	//****************************************************************************************************//
+
+	// RtlGenRandom [SystemFunction036]
+	extern "C" BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer, ULONG RandomBufferLength);
 	void GenerateRandomPassword(size_t length, std::wstring& genpassword) {
-		const wchar_t charset[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.$_@-[]{}~*#,;='";
+		const wchar_t charset[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+";
+		const size_t charset_size = sizeof(charset) / sizeof(wchar_t) - 1;
+
+		std::vector<BYTE> buf(length);
+		bool crypto_ok = RtlGenRandom(buf.data(), (ULONG)buf.size()) != FALSE;
+
 		genpassword.clear();
-		genpassword.reserve(length);  // reserve mem
-		for (size_t i = 0; i < length; ++i) {
-			genpassword += charset[rand() % (sizeof(charset)/sizeof(wchar_t) - 1)];
+		genpassword.reserve(length);
+
+		if (crypto_ok) {
+			// Криптоустойчивый способ
+			for (size_t i = 0; i < length; ++i) {
+				genpassword += charset[ buf[i] % charset_size ];
+			}
+		} else {
+			// Fallback на rand()
+			srand((unsigned)time(NULL) ^ GetTickCount());
+			for (size_t i = 0; i < length; ++i) {
+				genpassword += charset[rand() % charset_size];
+			}
 		}
 	}
+
+	//****************************************************************************************************//
 
 	//----------------------------------------------------------------------------------------------------//
 
