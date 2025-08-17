@@ -1,5 +1,5 @@
 // RunAsHidden.cpp
-// Version 3.0.9
+// Version 4.0.2
 // Author: [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk / https://github.com/BorizzK )
 // Forum: https://forum.ru-board.com/topic.cgi?forum=8&topic=82891#1
 // GitHub: https://github.com/BorizzK/RunAsHidden
@@ -17,8 +17,10 @@
 	#define SECURITY_WIN32
 	#define _WIN32_WINNT 0x0601
 	#include <windows.h>
+	#include <iomanip> // для setw
 	//#include <bcrypt.h>
 	#include <winerror.h>
+	#include <tchar.h>
 	#include <ntsecapi.h>
 	#include <userenv.h>
 	#include <secext.h> 
@@ -121,7 +123,8 @@
 		L"                                  the -k option is not specified.\n"
 		L"\n"
 		L"  -p, --password <password>       Password\n"
-		L"                                  --password=auto generates a strong random password.\n"
+		L"                                  If user logged in and have session, password can be empty (-p=.)\n"
+		L"                                  <password>=auto generates a strong random password for temporary user.\n"
 		L"\n"
 		L"  -k, --keep                      Keep the automatically created user for future use.\n"
 		L"\n"
@@ -291,7 +294,7 @@
 		const size_t charset_size = sizeof(charset) / sizeof(wchar_t) - 1;
 
 		std::vector<BYTE> buf(length);
-		bool crypto_ok = RtlGenRandom(buf.data(), (ULONG)buf.size()) != FALSE;
+		bool crypto_ok = RtlGenRandom(buf.data(), (ULONG)buf.size()) != false;
 
 		genpassword.clear();
 		genpassword.reserve(length);
@@ -349,11 +352,12 @@
 
 		LPWSTR sidString = NULL;
 		if (ConvertSidToStringSidW(*ppSid, &sidString)) {
-			//if (debug) std::wcout << L"[DEBUG]: User SID: " << sidString << L"\n";
+			if (debug) std::wcout << L"[DEBUG]: Getted User SID: " << sidString << L"\n";
 			LocalFree(sidString);
 			return true;
 		}
 		LocalFree(sidString);
+		if (*ppSid) { LocalFree(*ppSid); *ppSid = nullptr; }
 		print_error(L"GetSIDFromUsername: FAILED");
 		return false;
 	}
@@ -454,16 +458,14 @@
 
 		bool CopyDirectoryRecursive(const std::wstring& source, const std::wstring& dest) {
 
-			WIN32_FIND_DATAW findData;
-			HANDLE hFind;
+			WIN32_FIND_DATAW findData{};
+			HANDLE hFind = INVALID_HANDLE_VALUE; // init
 
 			DWORD attr = GetFileAttributesW(dest.c_str());
 			if (attr == INVALID_FILE_ATTRIBUTES) {
 				if (!CreateDirectoryW(dest.c_str(), NULL)) {
 					if (GetLastError() != ERROR_ALREADY_EXISTS) {
 						print_error(L"CopyDirectoryRecursive: Failed to create directory");
-						ZeroMemory(&findData, sizeof(findData));
-						FindClose(hFind);
 						return false;
 					}
 				}
@@ -474,8 +476,7 @@
 			hFind = FindFirstFileW(searchPath.c_str(), &findData);
 			if (hFind == INVALID_HANDLE_VALUE) {
 				print_error(L"CopyDirectoryRecursive: FindFirstFile failed");
-				FindClose(hFind);
-				ZeroMemory(&findData, sizeof(findData));
+
 				return false;
 			}
 
@@ -489,27 +490,28 @@
 
 				if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
 					if (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-						//if (debug) std::wcout << L"[DEBUG]: Skipping reparse point " << sourcePath << L"\n";
 						continue;
 					}
 					//Recursion
 					if (!CopyDirectoryRecursive(sourcePath, destPath)) {
-						ZeroMemory(&findData, sizeof(findData));
-						FindClose(hFind);
+						if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
 						return false;
 					}
 				} else {
 					if (!CopyFileW(sourcePath.c_str(), destPath.c_str(), false)) {
 						print_error((L"CreateAndInitializeAutoUser: Failed to copy file: " + sourcePath + L" to " + destPath).c_str());
-						ZeroMemory(&findData, sizeof(findData));
-						FindClose(hFind);
+						if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
 						return false;
 					}
 				}
 			} while (FindNextFileW(hFind, &findData) != 0);
 
-			ZeroMemory(&findData, sizeof(findData));
-			FindClose(hFind);
+			DWORD err = GetLastError();
+			if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
+				if (err != ERROR_NO_MORE_FILES) {
+				  SetLastError(err);
+				  return false;
+			}
 			return true;
 		}
 
@@ -619,10 +621,13 @@
 		username = userPrefix + userPostfix;
 		GenerateRandomPassword(dwSize,password);
 
-		std::wstring first3 = password.substr(0, 3);         
-		std::wstring last3  = password.substr(password.length() - 3); 
-
-		if (debug) std::wcout << L"[DEBUG]: Temporary user: " << username << L", password: " << first3 << "*" << last3 << L"\n";
+		if (debug) {
+				std::wstring first3 = password.substr(0, 3);         
+				std::wstring last3  = password.substr(password.length() - 3); 
+				std::wcout << L"[DEBUG]: Temporary user: " << username << L", password: " << first3 << "*" << last3 << L"\n";
+				SecureClear(first3);
+				SecureClear(last3);
+		}
 
 		if (!CreateDirectoryW(profileRoot.c_str(), NULL)) {
 			err = GetLastError();
@@ -707,8 +712,6 @@
 
 		SecureClear(username);
 		SecureClear(password);
-		SecureClear(first3);
-		SecureClear(last3);
 		SecureClear(profilePath);
 		//SecureClear(profileRoot); // const
 		//SecureClear(userPrefix); // const
@@ -870,7 +873,7 @@
 
 		if (!LookupPrivilegeValue(NULL, SE_DEBUG_NAME, &luid)) {
 			print_error(L"EnableDebugPrivilege: LookupPrivilegeValue failed");
-			CloseHandle(hToken);
+			SafeCloseHandle(hToken);
 			return false;
 		}
 
@@ -880,11 +883,11 @@
 
 		if (!AdjustTokenPrivileges(hToken, false, &tp, sizeof(tp), NULL, NULL)) {
 			print_error(L"EnableDebugPrivilege: AdjustTokenPrivileges failed");
-			CloseHandle(hToken);
+			SafeCloseHandle(hToken);
 			return false;
 		}
 
-		CloseHandle(hToken);
+		SafeCloseHandle(hToken);
 
 		if (GetLastError() == ERROR_NOT_ALL_ASSIGNED) {
 			print_error(L"EnableDebugPrivilege: The token does not have the specified privilege");
@@ -1270,6 +1273,7 @@
 
 		if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessionId, WTSWinStationName, &winStationName, &bytesReturned)) {
 			bool interactive = (_wcsicmp(winStationName, L"Console") == 0 || _wcsnicmp(winStationName, L"RDP", 3) == 0);
+			if (debug) std::wcout << L"[DEBUG]: winStationName for " << sessionId << L": " << winStationName << L"\n";
 			WTSFreeMemory(winStationName);
 			return interactive;
 		}
@@ -1446,8 +1450,8 @@
 
 		if (!IsUserInteractiveSession(userSessionId)) {
 			std::wstring msg = std::wstring(L"RunAsInteractive: User ") + fullUserName + L" session " + std::to_wstring(userSessionId) + L" is not interactive";
-			print_error(msg.c_str());
-			//return false;
+			if (debug) print_warning(msg.c_str());
+			//return false; // Process always start in logged user session
 		}
 
 		std::wstring cmdLineStr(cmdLine);
@@ -1538,7 +1542,7 @@
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
 
-	// FOR HIDDEN RUN FROM SYSTEM
+	// FOR HIDDEN RUN FROM SYSTEM V1 - STANDARD with login
 	bool RunUnderSystem(
 		const std::wstring& userOnly,
 		const std::wstring& domain,
@@ -1553,81 +1557,94 @@
 		LPVOID envBlock = NULL;
 		PROFILEINFO up = {0};
 		bool created = false;
+		bool profileloaded = false;
 
 		if (debug) std::wcout << L"[DEBUG]: RunUnderSystem:" << L"\n";
 
-		if (!LogonUserW(userOnly.c_str(), domain.c_str(), password.c_str(),
-						LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
-			print_error(L"RunUnderSystem: LogonUserW failed");
-			return false;
-		}
-
-		if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL,
-							  SecurityImpersonation, TokenPrimary, &hPrimaryToken)) {
-			print_error(L"RunUnderSystem: DuplicateTokenEx failed");
-			SafeCloseHandle(hToken);
-			return false;
-		}
-
-		if (!EnableTokenPrivilege(hPrimaryToken, SE_ASSIGNPRIMARYTOKEN_NAME)) {
-			if (debug) {
-				std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_ASSIGNPRIMARYTOKEN_NAME) failed for target user ") + userOnly;
-				print_warning(msg.c_str());
-			}
-		}
-		if (!EnableTokenPrivilege(hPrimaryToken, SE_INCREASE_QUOTA_NAME)) {
-			if (debug) {
-				std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_INCREASE_QUOTA_NAME) failed for user ") + userOnly;
-				print_warning(msg.c_str());
-			}
-		}
-		if (!EnableTokenPrivilege(hPrimaryToken, SE_TCB_NAME)) {
-			if (debug) {
-				std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_TCB_NAME) failed for target user ") + userOnly;
-				print_warning(msg.c_str());
-			}
-		}
-
-		if (debug) {
-			std::wcout << L"------------------------------------------\n";
-			PrintTokenPrivileges(hToken,userOnly.c_str());
-			std::wcout << L"------------------------------------------\n";
-		}
-
-		up.dwSize = sizeof(PROFILEINFO);
-		up.lpUserName = const_cast<LPWSTR>(userOnly.c_str());
-		bool profileloaded = false;
-		if (!LoadUserProfileW(hPrimaryToken, &up)) {
-			DWORD perr = GetLastError();
-			if (perr == ERROR_USER_PROFILE_ALREADY_LOADED) {
-				if (debug) {
-					std::wstring msg = std::wstring(L"RunUnderSystem: Profile already loaded or user: ") + userOnly;
-					print_warning(msg.c_str());
+		// Если сессия СУЩЕСТВУЕТ и запуск из под системы - для запуска программы в фоне НЕ НУЖЕН ПАРОЛЬ, ЛОГИН, ЗАГРУЗКА ПРОФИЛЯ...
+			DWORD userSessionId = 0xFFFFFFFF;
+			std::wstring fullUserName = domain + L"\\" + userOnly;
+			userSessionId = GetSessionIdByUserName(userOnly,domain);
+			if (userSessionId != 0xFFFFFFFF) {
+				// Сессия существует — получаем токен пользователя
+				if (!WTSQueryUserToken(userSessionId, &hPrimaryToken)) {
+					if (debug) std::wcout << L"[DEBUG]: WTSQueryUserToken failed, fallback to LogonUserW\n";
+				} else {
+					if (debug) std::wcout << L"[DEBUG]: Obtained token from existing session " << userSessionId << L"\n";
 				}
-			} 
-			else if (perr == 299 /* ERROR_PARTIAL_COPY */) {
-				if (debug) {
-					std::wstring msg = std::wstring(L"RunUnderSystem: Profile not loaded for user: ") + userOnly;
-					print_warning(msg.c_str());
-				}
+			}
+		//
+
+		if (!hPrimaryToken) { // USER IS NOT LOGGED IN
+			if (!LogonUserW(userOnly.c_str(), domain.c_str(), password.c_str(),
+							LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
+				print_error(L"RunUnderSystem: LogonUserW failed");
 				return false;
+			}
+			if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL,
+								  SecurityImpersonation, TokenPrimary, &hPrimaryToken)) {
+				print_error(L"RunUnderSystem: DuplicateTokenEx failed");
+				SafeCloseHandle(hToken);
+				return false;
+			}
+			if (!EnableTokenPrivilege(hPrimaryToken, SE_ASSIGNPRIMARYTOKEN_NAME)) {
+				if (debug) {
+					std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_ASSIGNPRIMARYTOKEN_NAME) failed for target user ") + userOnly;
+					print_warning(msg.c_str());
+				}
+			}
+			if (!EnableTokenPrivilege(hPrimaryToken, SE_INCREASE_QUOTA_NAME)) {
+				if (debug) {
+					std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_INCREASE_QUOTA_NAME) failed for user ") + userOnly;
+					print_warning(msg.c_str());
+				}
+			}
+			if (!EnableTokenPrivilege(hPrimaryToken, SE_TCB_NAME)) {
+				if (debug) {
+					std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_TCB_NAME) failed for target user ") + userOnly;
+					print_warning(msg.c_str());
+				}
+			}
+			if (debug) {
+				std::wcout << L"------------------------------------------\n";
+				PrintTokenPrivileges(hToken,userOnly.c_str());
+				std::wcout << L"------------------------------------------\n";
+			}
+
+			up.dwSize = sizeof(PROFILEINFO);
+			up.lpUserName = const_cast<LPWSTR>(userOnly.c_str());
+			if (!LoadUserProfileW(hPrimaryToken, &up)) {
+				DWORD perr = GetLastError();
+				if (perr == ERROR_USER_PROFILE_ALREADY_LOADED) {
+					if (debug) {
+						std::wstring msg = std::wstring(L"RunUnderSystem: Profile already loaded or user: ") + userOnly;
+						print_warning(msg.c_str());
+					}
+				} 
+				else if (perr == 299 /* ERROR_PARTIAL_COPY */) {
+					if (debug) {
+						std::wstring msg = std::wstring(L"RunUnderSystem: Profile not loaded for user: ") + userOnly;
+						print_warning(msg.c_str());
+					}
+					return false;
+				} else {
+					std::wstring msg = std::wstring(L"RunUnderSystem: LoadUserProfile failed for user: ") + userOnly;
+					print_warning(msg.c_str());
+					SafeCloseHandle(hPrimaryToken);
+					SafeCloseHandle(hToken);
+					return false;
+				}
 			} else {
-				std::wstring msg = std::wstring(L"RunUnderSystem: LoadUserProfile failed for user: ") + userOnly;
-				print_warning(msg.c_str());
+				profileloaded = true;
+			}
+
+			if (!CreateEnvironmentBlock(&envBlock, hPrimaryToken, true)) {
+				print_error(L"RunUnderSystem: CreateEnvironmentBlock failed");
+				if (profileloaded) UnloadUserProfile(hPrimaryToken, up.hProfile);
 				SafeCloseHandle(hPrimaryToken);
 				SafeCloseHandle(hToken);
 				return false;
 			}
-		} else {
-			profileloaded = true;
-		}
-
-		if (!CreateEnvironmentBlock(&envBlock, hPrimaryToken, true)) {
-			print_error(L"RunUnderSystem: CreateEnvironmentBlock failed");
-			if (profileloaded) UnloadUserProfile(hPrimaryToken, up.hProfile);
-			SafeCloseHandle(hPrimaryToken);
-			SafeCloseHandle(hToken);
-			return false;
 		}
 
 		WCHAR windowsDir[MAX_PATH];
@@ -1661,7 +1678,7 @@
 		return created;
 	}
 
-	// FOR HIDDEN RUN FROM ADMIN USER
+	// FOR HIDDEN RUN FROM ADMIN USER // DEPRICATED
 	bool RunUnderUser(
 		const std::wstring& userOnly,
 		const std::wstring& domain,
@@ -1739,7 +1756,8 @@
 	//=================================================================================================================================================================//
 
 	// Ctrl+C/Break - send Ctrl+C to process/process group
-	BOOL WINAPI CtrlHandler(DWORD ctrlType) {
+
+	BOOL WINAPI CtrlHandlerV1(DWORD ctrlType) {
 		if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) {
 			if (g_pi.hProcess != NULL) {
 				if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, g_pi.dwProcessId)) {
@@ -1756,6 +1774,90 @@
 		}
 		return false; // return false for other signals to allow default handling
 	}
+
+	BOOL WINAPI CtrlHandler(DWORD ctrlType) {
+		if (ctrlType == CTRL_C_EVENT || ctrlType == CTRL_BREAK_EVENT) {
+			if (g_pi.hProcess != NULL) {
+				if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, g_pi.dwProcessId)) {
+					print_error(L"GenerateConsoleCtrlEvent failed");
+				}
+				DWORD wait = WaitForSingleObject(g_pi.hProcess, 5000);
+				if (wait == WAIT_TIMEOUT) {
+					std::wcout << L"[INFO]: Child process still active, terminating forcibly...\n";
+					TerminateProcess(g_pi.hProcess, 1);
+				}
+			}
+			return true;
+		}
+		return false;
+	}
+
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
+		//#include <cstdio>
+
+		struct ProcInfo {
+			std::wstring processName;
+			DWORD pid;
+			std::wstring windowTitle;
+		};
+
+		std::vector<ProcInfo> EnumAllUserProcesses(const std::wstring& username) {
+			std::vector<ProcInfo> result;
+
+			std::wstring cmd = L"tasklist /v /fo csv /nh /fi \"username eq " + username + L"\"";
+			FILE* pipe = _wpopen(cmd.c_str(), L"r");
+			if (!pipe) return result;
+
+			wchar_t buffer[1024];
+			while (fgetws(buffer, 1024, pipe)) {
+				std::wstring line(buffer);
+				line.erase(std::remove(line.begin(), line.end(), L'\n'), line.end());
+
+				ProcInfo pi;
+				size_t pos = 0;
+				std::vector<std::wstring> fields;
+				while ((pos = line.find(L'"')) != std::wstring::npos) {
+					size_t end = line.find(L'"', pos + 1);
+					fields.push_back(line.substr(pos + 1, end - pos - 1));
+					line = line.substr(end + 1);
+					if (!line.empty() && line[0] == L',') line.erase(0,1);
+				}
+
+				if (fields.size() >= 3) {
+					pi.processName = fields[0];
+					pi.pid = std::stoul(fields[1]);
+					std::wstring wTitle = fields.back();
+
+						//std::wstring s = wTitle;
+						//std::wcout << L"Window title codes: ";
+						//for (wchar_t c : s) {
+						//	std::wcout << std::hex << std::showbase << (int)c << L" ";
+						//}
+						//std::wcout << L"\n";
+
+					// проверка OEM-кодов для "Н/Д" (0x8D/0x2F/0x84)
+					if (wTitle.size() == 3 && 
+						wTitle[0] == 0x8D && 
+						wTitle[1] == 0x2F && 
+						wTitle[2] == 0x84) {
+						wTitle = L"N/A";
+					}
+
+					pi.windowTitle = wTitle;
+
+				} else {
+					pi.windowTitle = L"N/A";
+				}
+
+				result.push_back(std::move(pi));
+			}
+
+			_pclose(pipe);
+			return result;
+		}
 
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
@@ -1784,6 +1886,7 @@
 		bool silent = false;
 		bool autouser = false;
 		bool has_command = false;
+		bool queryUserProcs = false;
 		size_t pos;
 
 		std::wstring cmdLine;
@@ -1901,17 +2004,25 @@
 				continue;
 			}
 
-			// command
-			if (arg == L"-c" || arg == L"--command" || arg == L"-command" ||
-				starts_with(arg, L"-c=") || starts_with(arg, L"--command=") || starts_with(arg, L"-command=")) {
-				if (!extract_value(arg, i, command)) {
-					std::wcerr << arg << L" requires a command string\n";
-					SetLastError(1);
-					exitCode = 2;
-					goto exitmain;
-				}
+			if (arg == L"-query-procs" || arg == L"--query-procs") {
+				queryUserProcs = true;
 				has_command = true;
 				break;
+			}
+
+			// command
+			if (!has_command) {
+				if (arg == L"-c" || arg == L"--command" || arg == L"-command" ||
+					starts_with(arg, L"-c=") || starts_with(arg, L"--command=") || starts_with(arg, L"-command=")) {
+					if (!extract_value(arg, i, command)) {
+						std::wcerr << arg << L" requires a command string\n";
+						SetLastError(1);
+						exitCode = 2;
+						goto exitmain;
+					}
+					has_command = true;
+					break;
+				}
 			}
 
 			std::wcerr << L"Unknown or unexpected argument\n";
@@ -1986,6 +2097,34 @@
 			std::wcout << L"------------------------------------------\n";
 		}
 
+		// get user procs
+			if (queryUserProcs) {
+				PSID pSid = nullptr;
+				if (GetSIDFromUsername(username, &pSid)) {
+					auto procs = EnumAllUserProcesses(username);
+
+					// заголовок таблицы
+					std::wcout << std::left
+							   << std::setw(32) << L"Process Name"
+							   << std::setw(10) << L"PID"
+							   << L"Window Title\n";
+					std::wcout << std::wstring(60, L'-') << L"\n";
+
+					for (auto& p : procs) {
+						std::wcout << std::left
+								   << std::setw(25) << p.processName
+								   << std::setw(10) << p.pid
+								   << p.windowTitle << L"\n";
+					}
+
+					LocalFree(pSid);
+				} else {
+					std::wcout << L"Error GET SID for user\n";
+				}
+				exitCode = 0;
+				goto exitmain;
+			}
+		// get user procs end
 
 		//Under Construction
 		srand((unsigned int)time(NULL));
@@ -2042,6 +2181,9 @@
 			}
 			if (silent) {
 				std::wcout << L"[DEBUG]: Silent\n";
+			}
+			if (queryUserProcs) {
+				std::wcout << L"[DEBUG]: Query user processes: " << username << L"\n";
 			}
 			std::wcout << L"------------------------------------------\n";
 		}
