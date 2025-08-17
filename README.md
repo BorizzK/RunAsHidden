@@ -1,21 +1,21 @@
 # RunAsHidden
 
-**Version:** 3.0.9.0  
+**Version:** 4.0.2.0  
 **Author:** [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk/)  
 **License:** MIT  
-**Platform:** Windows x64 only
+**Platform:** Windows 7 / 10 / 11 / Server 2022 (x64 only)
 
 ---
 
-**RunAsHidden** is a command-line utility for Windows x64 that executes a command or process **under a different user account**, optionally hiding the window and redirecting output.
-Useful for system administration, automation, service tasks, and privilege separation scenarios.
-RanAs alternative for use in scripts.
+**RunAsHidden** is a command-line utility for Windows x64 that executes a command or process **under a different user account**, optionally hiding the window and redirecting output.  
+Useful for system administration, automation, service tasks, and privilege separation scenarios.  
+RunAs alternative for use in scripts.
 
 ---
 
 ## 🔧 Usage
 
-```bash
+```cmd
 RunAsHidden.exe -u <username> -p <password> [options] -c <command>
 ```
 
@@ -25,7 +25,7 @@ RunAsHidden.exe -u <username> -p <password> [options] -c <command>
 | Option | Description |
 |--------|-------------|
 | `-u`, `--username <username>` | Username: `'user'`, `'domain\\user'`, or `'user@domain'`. <br> `--username=auto` creates a hidden temporary administrator account with an isolated profile in `%SystemRoot%\Temp\RAH\`. The user is deleted after the command completes unless the `-k` option is specified. |
-| `-p`, `--password <password>` | Password. <br> `--password=auto` generates a strong random password. |
+| `-p`, `--password <password>` | Password. If user logged in and have session, password can be empty (-p=.)<br> `--password=auto` generates a strong random password. |
 | `-k`, `--keep` | Keep the automatically created user for future use. |
 | `-n`, `--nowait` | Do not wait for the command to finish. Returns `0` if the process started successfully, otherwise `1`. |
 | `-t`, `--timeout <time in sec>` | Wait for the specified timeout before the program exits, and before deleting the temporary user and its profile. Can be used in multiple scenarios. |
@@ -39,7 +39,7 @@ RunAsHidden.exe -u <username> -p <password> [options] -c <command>
 
 ### Examples
 
-```bash
+```cmd
 RunAsHidden.exe -u user -p pass -c "whoami"
 RunAsHidden.exe --username=domain\\user --password=pass --debug -c "dism.exe /online /get-packages"
 RunAsHidden.exe --username user --password pass --debug -c "dism.exe /online /get-packages"
@@ -52,9 +52,9 @@ RunAsHidden.exe -u=auto -p=auto -c "my_script.bat"
 
 ## 💡 Notes
 
-- `--direct` mode does not support operators like `>`, `&&`, or `|`.  
+- Experiment option `--query-procs` not used.
+- `--direct` mode does not support operators like `>`, `&&`, or `|` inside in Command line (-c option).
 - To capture output, redirect **RunAsHidden's own stdout**, e.g.:
-
 ```
 RunAsHidden.exe ... > result.txt
 ```
@@ -64,7 +64,7 @@ RunAsHidden.exe ... > result.txt
 ## 📦 Building
 
 - Language: C++
-- Platform: **Windows x64 only**
+- Platform: **Windows 7 / 10 / 11 / Server 2022 (x64 only)**
 - Requires: MinGW-w64 or any Windows x64 C++ compiler
 
 ---
@@ -73,10 +73,11 @@ RunAsHidden.exe ... > result.txt
 
 - [ ] Write to log file along with console output
 - [ ] GUI wrapper (optional)
-- [ ] GUI windows with condole output and/or progress instead console output
+- [ ] GUI window with console output and/or progress instead of console only
 
 ---
 
 ## 📄 License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file.
+
