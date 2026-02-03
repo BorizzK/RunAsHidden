@@ -1,5 +1,5 @@
 // RunAsHidden.cpp
-// Version 4.0.2
+// Version 4.0.3
 // Author: [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk / https://github.com/BorizzK )
 // Forum: https://forum.ru-board.com/topic.cgi?forum=8&topic=82891#1
 // GitHub: https://github.com/BorizzK/RunAsHidden
@@ -41,6 +41,8 @@
 	#include <algorithm> 	// для std::transform
 	#include <cstdlib>
 	#include <ctime>
+	//#include <Shlwapi.h> //PathFileExistsW
+	//#pragma comment(lib, "Shlwapi.lib") //PathFileExistsW
 	#ifndef ERROR_USER_PROFILE_ALREADY_LOADED
 	#define ERROR_USER_PROFILE_ALREADY_LOADED 1500
 	#endif
@@ -108,55 +110,62 @@
 
 	//----------------------------------------------------------------------------------------------------//
 
-	void print_help() {
-		std::wcout << L"RunAsHidden Version: " << GetFileVersion() << L"\n";
-		std::wcout <<
-		L"\n"
-		L"Usage:\n"
-		L"  RunAsHidden.exe -u <username> -p <password> [options] -c <command>\n"
-		L"\n"
-		L"Options:\n"
-		L"  -u, --username <username>       Username: 'user', 'domain\\\\user', or 'user@domain'\n"
-		L"                                  --username=auto creates a hidden temporary administrator account\n"
-		L"                                  with an isolated profile in %SystemRoot%\\Temp\\RAH\\\n"
-		L"                                  The user is deleted after the command completes if\n"
-		L"                                  the -k option is not specified.\n"
-		L"\n"
-		L"  -p, --password <password>       Password\n"
-		L"                                  If user logged in and have session, password can be empty (-p=.)\n"
-		L"                                  <password>=auto generates a strong random password for temporary user.\n"
-		L"\n"
-		L"  -k, --keep                      Keep the automatically created user for future use.\n"
-		L"\n"
-		L"  -n, --nowait                    Do not wait for the command to finish.\n"
-		L"                                  Returns 0 if the process started successfully, otherwise 1.\n"
-		L"\n"
-		L"  -t, --timeout <time in sec>     Wait for the specified timeout before the program exits,\n"
-		L"                                  and before deleting the temporary user and its profile.\n"
-		L"                                  Can be used in multiple scenarios. Max value is 60\n"
-		L"\n"
-		L"  -d, --direct                    Run the command directly (without 'cmd.exe /c').\n"
-		L"                                  In this mode, shell operators (like '>') are not interpreted.\n"
-		L"                                  To capture output, redirect RunAsHidden's own output.\n"
-		L"\n"
-		L"  -v, --visible                   Run the command interactively (with a window) in the active\n"
-		L"                                  session of the logged-on user.\n"
-		L"\n"
-		L"  -debug, --debug                 Enable debug output (command line and diagnostics).\n"
-		L"\n"
-		L"  -c, --command <command>         Command line to run (must be the last argument).\n"
-		L"                                  Quotes inside arguments must be escaped with a backslash (\\\\).\n"
-		L"\n"
-		L"  -h, --help, -?                  Show this help message.\n"
-		L"\n"
-		L"Examples:\n"
-		L"  RunAsHidden.exe -u user -p pass -c \"whoami\"\n"
-		L"  RunAsHidden.exe --username=domain\\\\user --password=pass --debug -c \"dism.exe /online /get-packages\"\n"
-		L"  RunAsHidden.exe -u=auto -p=auto -debug -c \"dism /english /online /get-packages >c:\\\\dism.log 2>&1\"\n"
-		L"  RunAsHidden.exe -u user@domain -p pass -c \"whoami >\\\"C:\\\\Log Files\\\\whoami.log\\\"\"\n"
-		L"  RunAsHidden.exe -u=auto -p=auto -c \"my_script.bat\"\n"
-		L"  RunAsHidden.exe -u auto -p auto -d -t 2 -k -c \"whoami\"\n";
-	}
+void print_help() {
+    std::wcout << L"RunAsHidden Version: " << GetFileVersion() << L"\n\n";
+
+    std::wcout <<
+    L"Usage:\n"
+    L"  RunAsHidden.exe -u <username> -p <password> [options] -c <command> [-params <parameters>]\n\n"
+
+    L"Options:\n"
+    L"  -u, --username <username>       Target username. Formats:\n"
+    L"                                  'user'             - local user\n"
+    L"                                  'domain\\\\user'    - domain user\n"
+    L"                                  'user@domain'      - domain user\n"
+    L"                                  'auto'             - automatically create temporary hidden admin user\n"
+    L"                                                      with isolated profile in %SystemRoot%\\Temp\\RAH\\\n"
+    L"\n"
+    L"  -p, --password <password>       Password for the user.\n"
+    L"                                  Can be empty (-p=.) for logged-in session.\n"
+    L"                                  'auto' generates a strong random password for temporary user.\n"
+    L"\n"
+    L"  -k, --keep                      Keep the automatically created temporary user for future use.\n"
+    L"\n"
+    L"  -n, --nowait                    Do not wait for the command to finish.\n"
+    L"                                  Returns 0 if process started successfully, otherwise 1.\n"
+    L"\n"
+    L"  -t, --timeout <seconds>         Wait the specified time before exiting and/or deleting temporary user.\n"
+    L"                                  Maximum allowed: 60 seconds.\n"
+    L"\n"
+    L"  -d, --direct                    Run the command directly without 'cmd.exe /c'.\n"
+    L"                                  Shell operators like >, |, & are not interpreted.\n"
+    L"                                  Useful for direct execution or capturing output manually.\n"
+    L"\n"
+    L"  -v, --visible                   Run the command interactively (window visible) in the active session.\n"
+    L"\n"
+    L"  -verb, --verbose                Enable small debug output of command details.\n"
+    L"\n"
+    L"  -debug, --debug                 Enable debug output, diagnostics, and command details.\n"
+    L"\n"
+    L"  -c, --command <command>         Command line to execute. Can include full path.\n"
+    L"                                  Quotes inside must be escaped with backslash (\\\\).\n"
+    L"\n"
+    L"  -params <parameters>            Optional parameters for the command. Passed exactly as-is.\n"
+    L"                                  Use quotes if parameters contain spaces, escape internal quotes with \\\\.\n"
+    L"\n"
+    L"  -h, --help, -?                  Show this help message.\n\n"
+
+    L"Examples:\n"
+    L"  RunAsHidden.exe -u user -p pass -c \"whoami\"\n"
+    L"  RunAsHidden.exe -u=domain\\\\user -p=pass -c \"dism.exe /online /get-packages\"\n"
+    L"  RunAsHidden.exe -u=auto -p=auto -c \"\\\"C:\\\\Program Files\\\\app.exe\\\" -arg1 -arg2\"\n"
+    L"  RunAsHidden.exe -u=auto -p=auto -c \"\\\"script.cmd\\\" JJJ \\\"222\\\"\"\n"
+    L"  RunAsHidden.exe -u=auto -p=auto -c \"\\\"script.cmd\\\"\" -params=\"\\\"222\\\" 333\"\n"
+    L"      // Equivalent to: \"script.cmd\" \"222\" 333\n"
+    L"  RunAsHidden.exe -u=auto -p=auto -c \"\\\"Updater.cmd\\\"\" -params=\"--file=\\\"C:\\\\Logs\\\\log.txt\\\" --mode=fast\"\n"
+    L"  RunAsHidden.exe -u auto -p auto -d -c \"C:\\\\Windows\\\\System32\\\\whoami.exe\"\n"
+    L"  RunAsHidden.exe -u auto -p auto -d -t 2 -k -c \"whoami\"\n";
+}
 
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
@@ -319,11 +328,12 @@
 
 	bool GetSIDFromUsername(const std::wstring& username, PSID* ppSid) {
 		if (!ppSid) return false;
+		*ppSid = nullptr; //Reset
 
 		DWORD sidSize = 0, domainSize = 0;
 		SID_NAME_USE use;
 
-		// Budd sizes
+		// Get buffer sizes
 		LookupAccountNameW(NULL, username.c_str(), NULL, &sidSize, NULL, &domainSize, &use);
 		DWORD err = GetLastError();
 		if (err != ERROR_INSUFFICIENT_BUFFER) {
@@ -352,13 +362,14 @@
 
 		LPWSTR sidString = NULL;
 		if (ConvertSidToStringSidW(*ppSid, &sidString)) {
-			if (debug) std::wcout << L"[DEBUG]: Getted User SID: " << sidString << L"\n";
+			if (debug) std::wcout << L"[DEBUG]: Retrieved User SID: " << sidString << L"\n";
 			LocalFree(sidString);
 			return true;
 		}
 		LocalFree(sidString);
-		if (*ppSid) { LocalFree(*ppSid); *ppSid = nullptr; }
-		print_error(L"GetSIDFromUsername: FAILED");
+		LocalFree(*ppSid); //reset
+		*ppSid = nullptr; //reset
+ 		print_error(L"GetSIDFromUsername: FAILED");
 		return false;
 	}
 
@@ -606,6 +617,12 @@
 
 		}
 	// PROFILE
+
+	// NOTE: Fixed username intentionally — parallel execution not supported.
+	// For concurrent runs, uncomment random suffix generation below:
+	// username = userPrefix + GenerateRandomString(6);
+	// And comment fixed
+	// username = userPrefix + userPostfix;
 
 	bool CreateAndInitializeAutoUser(std::wstring& outUsername, std::wstring& outPassword) {
 
@@ -1722,10 +1739,73 @@
 					std::wcout << L"------------------------------------------\n";
 					SafeCloseHandle(hProcessToken);
 				} else {
-					print_error(L"[DEBUG]: RunUnderUser: OpenProcessToken failed");
+					print_error(L"RunUnderUser: OpenProcessToken failed");
 				}
 			}
 		}
+
+		return created;
+	}
+
+	bool RunUnderCurrentUser(
+		wchar_t* cmdLine,
+		STARTUPINFOW& si,
+		PROCESS_INFORMATION& pi,
+		DWORD creationFlags
+	) {
+		HANDLE hToken = NULL;
+		HANDLE hPrimaryToken = NULL;
+		LPVOID envBlock = NULL;
+
+		if (!OpenProcessToken(
+				GetCurrentProcess(),
+				TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY,
+				&hToken)) {
+			print_error(L"RunUnderCurrentUser: OpenProcessToken failed");
+			return false;
+		}
+
+		if (!DuplicateTokenEx(
+				hToken,
+				MAXIMUM_ALLOWED,
+				NULL,
+				SecurityImpersonation,
+				TokenPrimary,
+				&hPrimaryToken)) {
+			print_error(L"RunUnderCurrentUser: DuplicateTokenEx failed");
+			SafeCloseHandle(hToken);
+			return false;
+		}
+
+		if (!CreateEnvironmentBlock(&envBlock, hPrimaryToken, true)) {
+			print_error(L"RunUnderCurrentUser: CreateEnvironmentBlock failed");
+			envBlock = NULL; // fallback
+		}
+
+		WCHAR windowsDir[MAX_PATH];
+		GetWindowsDirectoryW(windowsDir, MAX_PATH);
+
+		BOOL created = CreateProcessAsUserW(
+			hPrimaryToken,
+			NULL,
+			cmdLine,
+			NULL,
+			NULL,
+			TRUE,
+			creationFlags | CREATE_UNICODE_ENVIRONMENT,
+			envBlock,
+			windowsDir,
+			&si,
+			&pi
+		);
+
+		if (!created) {
+			print_error(L"RunUnderCurrentUser: CreateProcessAsUserW failed");
+		}
+
+		if (envBlock) DestroyEnvironmentBlock(envBlock);
+		SafeCloseHandle(hPrimaryToken);
+		SafeCloseHandle(hToken);
 
 		return created;
 	}
@@ -1862,6 +1942,31 @@
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
 
+		bool IsCmdScript(const std::wstring& path)
+		{
+			if (path.empty()) return false;
+
+			std::wstring image;
+
+			if (path[0] == L'"') {
+				auto pos = path.find(L'"', 1);
+				if (pos == std::wstring::npos) return false;
+				image = path.substr(1, pos - 1);
+			} else {
+				auto pos = path.find(L' ');
+				image = (pos == std::wstring::npos) ? path : path.substr(0, pos);
+			}
+
+			auto dot = image.rfind(L'.');
+			if (dot == std::wstring::npos) return false;
+
+			std::wstring ext = image.substr(dot);
+			return _wcsicmp(ext.c_str(), L".cmd") == 0 || _wcsicmp(ext.c_str(), L".bat") == 0;
+		}
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
 	int wmain(int argc, wchar_t* argv[]) {
 
 		if (argc < 3) {
@@ -1876,10 +1981,10 @@
 
 		if (IsRunningAsSystem()) isSystem = true;
 
-		std::wstring username, userOnly, password, domain, tempusername, temppassword, command;
-		std::wstring timeoutS;
+		std::wstring username, userOnly, password, domain, tempusername, temppassword, commandPath, command, cmdparams, timeoutS;
 		int timeoutMs = 0;
 		debug = false; // GLOBAL
+		bool verb = false;
 		bool visible = false;
 		bool nowait = false;
 		bool direct = false;
@@ -1887,6 +1992,7 @@
 		bool autouser = false;
 		bool has_command = false;
 		bool queryUserProcs = false;
+		bool RunAsCurrentUser = false;
 		size_t pos;
 
 		std::wstring cmdLine;
@@ -1937,19 +2043,37 @@
 				continue;
 			}
 
-			// helper extract val
-			auto extract_value = [&](const std::wstring &a, int &idx, std::wstring &out) -> bool {
-				size_t pos = a.find(L'=');
-				if (pos != std::wstring::npos) {
-					out = trim_quotes(a.substr(pos + 1));
+			if (arg == L"-verb" || arg == L"--verb" || arg == L"-verbose" || arg == L"--verbose") {
+				verb = true;
+				continue;
+			}
+
+			// helpers extract vals
+				auto extract_value = [&](const std::wstring &a, int &idx, std::wstring &out) -> bool {
+					size_t pos = a.find(L'=');
+					if (pos != std::wstring::npos) {
+						out = trim_quotes(a.substr(pos + 1));
+						return true;
+					}
+					if (idx + 1 >= argc) return false;
+					std::wstring next = argv[idx + 1];
+					if (!next.empty() && next[0] == L'-') return false; // protect: capture another opt
+					out = trim_quotes(argv[++idx]);
 					return true;
-				}
-				if (idx + 1 >= argc) return false;
-				std::wstring next = argv[idx + 1];
-				if (!next.empty() && next[0] == L'-') return false; // protect: capture another opt
-				out = trim_quotes(argv[++idx]);
-				return true;
-			};
+				};
+				auto extract_value_raw = [&](const std::wstring &a, int &idx, std::wstring &out) -> bool {
+					size_t pos = a.find(L'=');
+					if (pos != std::wstring::npos) {
+						out = a.substr(pos + 1);
+						return true;
+					}
+					if (idx + 1 >= argc) return false;
+					std::wstring next = argv[idx + 1];
+					if (!next.empty() && next[0] == L'-') return false; // skip next option
+					out = argv[++idx];
+					return true;
+				};
+			// helpers extract vals end
 
 			// timeout
 			if (arg == L"-t" || arg == L"-timeout" || arg == L"--timeout" ||
@@ -1987,7 +2111,6 @@
 					exitCode = 2;
 					goto exitmain;
 				}
-				if (debug) std::wcout << L"user: " << username << L"\n";
 				continue;
 			}
 
@@ -2000,7 +2123,6 @@
 					exitCode = 2;
 					goto exitmain;
 				}
-				if (debug) std::wcout << L"Pass: " << L"***" << L"\n"; // pass not printing
 				continue;
 			}
 
@@ -2011,18 +2133,28 @@
 			}
 
 			// command
-			if (!has_command) {
-				if (arg == L"-c" || arg == L"--command" || arg == L"-command" ||
-					starts_with(arg, L"-c=") || starts_with(arg, L"--command=") || starts_with(arg, L"-command=")) {
-					if (!extract_value(arg, i, command)) {
-						std::wcerr << arg << L" requires a command string\n";
-						SetLastError(1);
-						exitCode = 2;
-						goto exitmain;
-					}
-					has_command = true;
-					break;
+			if (arg == L"-c" || arg == L"--command" ||
+				starts_with(arg, L"-c=") || starts_with(arg, L"--command=")) {
+
+				if (!extract_value_raw(arg, i, command)) {  // trim quotes
+					std::wcerr << arg << L" requires a command string\n";
+					exitCode = 2;
+					goto exitmain;
 				}
+				has_command = true;
+				continue;
+			}
+
+			// command params
+			if (arg == L"-params" || arg == L"--params" ||
+				starts_with(arg, L"-params=") || starts_with(arg, L"--params=")) {
+
+				if (!extract_value_raw(arg, i, cmdparams)) {  // RAW
+					std::wcerr << arg << L" requires a value\n";
+					exitCode = 2;
+					goto exitmain;
+				}
+				continue;
 			}
 
 			std::wcerr << L"Unknown or unexpected argument\n";
@@ -2032,12 +2164,42 @@
 			goto exitmain;
 		}
 
-		if (username.empty() || password.empty() || !has_command) {
+		if (debug) {
+			std::wcout << L"RunAsHidden Version: " << GetFileVersion() << L"\n";
+			std::wcout << L"------------------------------------------\n";
+		}
+
+		if (!has_command) {
 			std::wcerr << L"Missing required parameters\n";
 			print_help();
 			SetLastError(1);
 			exitCode = 2;
 			goto exitmain;
+		}
+
+		if (debug) {
+			std::wcout << L"[DEBUG]: User: " << username << L"\n";
+			std::wcout << L"[DEBUG]: Pass: " << L"***" << L"\n"; // pass not printing
+			std::wcout << L"[DEBUG]: Command: " << command << L"\n";
+			std::wcout << L"[DEBUG]: Params: " << cmdparams << L"\n";
+			std::wcout << L"[DEBUG]: Direct run: " << direct << L"\n";
+			std::wcout << L"[DEBUG]: Is cmd script: " << IsCmdScript(command) << L"\n";
+			std::wcout << L"------------------------------------------\n";
+		}
+
+		if (username.empty() || username == L"." ) {
+			username = L".";   // current user
+			password = L"";   // current user
+			RunAsCurrentUser = true;
+		}
+
+		if (!debug && verb) {
+			std::wcout << L"Command: " << command << L"\n";
+			if (!cmdparams.empty()) {
+				std::wcout << L"Params: " << cmdparams << L"\n";
+			}
+			std::wcout << L"Direct run: " << direct << L"\n";
+			std::wcout << L"Is cmd script: " << IsCmdScript(command) << L"\n";
 		}
 
 		// Domain / userOnly
@@ -2055,8 +2217,8 @@
 			}
 		}
 		
-		if ( userOnly == L"auto" || userOnly == L"." || userOnly == L"*" ) {
-			if ( password == L"auto" || password == L"." || password == L"*" ) {
+		if ( userOnly == L"auto" || userOnly == L"*" ) {
+			if ( password == L"auto" || password == L"*" ) {
 				autouser = true;
 			}
 		}
@@ -2090,11 +2252,6 @@
 				std::wcerr << L"Incorrect timeout: " << timeoutS << L", will be reset to 0\n";
 				timeoutMs = 0;
 			}
-		}
-
-		if (debug) {
-			std::wcout << L"RunAsHidden Version: " << GetFileVersion() << L"\n";
-			std::wcout << L"------------------------------------------\n";
 		}
 
 		// get user procs
@@ -2280,11 +2437,33 @@
 
 		}
 
-		if (direct) {
-			cmdLine = command; // Direct
-		} else {
-			cmdLine = L"cmd.exe /c " + command; // Trouhg cmd.exe
+		if (direct && IsCmdScript(command)) {
+			std::wcerr << L"Direct mode is not allowed for .cmd/.bat\n";
+			SetLastError(ERROR_INVALID_PARAMETER);
+			exitCode = 2;
+			goto exitmain;
 		}
+
+		if (direct) {
+			// direct run
+			cmdLine = command;
+			if (!cmdparams.empty())
+				cmdLine += L" " + cmdparams;
+		} else {
+			// cmd.exe /c
+			cmdLine = L"cmd.exe /c \"" + command;
+			if (!cmdparams.empty())
+				cmdLine += L" " + cmdparams;
+			cmdLine += L"\"";
+		}
+
+		if (debug) {
+			std::wcout << L"[DEBUG]: Execute command line: " << cmdLine << L"\n";
+		} 
+		else if (verb) {
+			std::wcout << L"Execute command line: " << cmdLine << L"\n";
+		}
+
 		cmdLineBuf.assign(cmdLine.begin(), cmdLine.end());
 		cmdLineBuf.push_back(L'\0');
 
@@ -2327,27 +2506,41 @@
 		si.hStdOutput = hWrite;
 		si.hStdError = hWrite;
 
-		if (isSystem) {
-			created = RunUnderSystem(userOnly, domain, password, cmdLineBuf.data(), si, g_pi, creationFlags);
+		if (RunAsCurrentUser) {
+			created = RunUnderCurrentUser(
+				cmdLineBuf.data(),
+				si,
+				g_pi,
+				creationFlags
+			);
 			if (!created) {
-				print_error(L"RunUnderSystem failed");
-				SafeCloseHandle(hWrite);
-				SafeCloseHandle(hRead);
-				SafeCloseHandle(g_pi.hProcess);
-				SafeCloseHandle(g_pi.hThread);
+				print_error(L"RunUnderCurrentUser failed");
 				exitCode = 1;
 				goto exitmain;
 			}
 		} else {
-			created = RunUnderUser(userOnly, domain, password, cmdLineBuf.data(), si, g_pi, creationFlags);
-			if (!created) {
-				print_error(L"RunUnderUser failed");
-				SafeCloseHandle(hWrite);
-				SafeCloseHandle(hRead);
-				SafeCloseHandle(g_pi.hProcess);
-				SafeCloseHandle(g_pi.hThread);
-				exitCode = 1;
-				goto exitmain;
+			if (isSystem) {
+				created = RunUnderSystem(userOnly, domain, password, cmdLineBuf.data(), si, g_pi, creationFlags);
+				if (!created) {
+					print_error(L"RunUnderSystem failed");
+					SafeCloseHandle(hWrite);
+					SafeCloseHandle(hRead);
+					SafeCloseHandle(g_pi.hProcess);
+					SafeCloseHandle(g_pi.hThread);
+					exitCode = 1;
+					goto exitmain;
+				}
+			} else {
+				created = RunUnderUser(userOnly, domain, password, cmdLineBuf.data(), si, g_pi, creationFlags);
+				if (!created) {
+					print_error(L"RunUnderUser failed");
+					SafeCloseHandle(hWrite);
+					SafeCloseHandle(hRead);
+					SafeCloseHandle(g_pi.hProcess);
+					SafeCloseHandle(g_pi.hThread);
+					exitCode = 1;
+					goto exitmain;
+				}
 			}
 		}
 
