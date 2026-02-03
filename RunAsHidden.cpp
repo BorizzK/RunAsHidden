@@ -123,7 +123,7 @@ void print_help() {
     L"                                  'domain\\\\user'    - domain user\n"
     L"                                  'user@domain'      - domain user\n"
     L"                                  'auto'             - automatically create temporary hidden admin user\n"
-    L"                                                      with isolated profile in %SystemRoot%\\Temp\\RAH\\\n"
+    L"                                                      with isolated profile in %SystemRoot%\\Temp\\.RAH\\\n"
     L"\n"
     L"  -p, --password <password>       Password for the user.\n"
     L"                                  Can be empty (-p=.) for logged-in session.\n"
@@ -629,7 +629,7 @@ void print_help() {
 		std::wstring username, password, profilePath;
 		const std::wstring userPrefix = L"rah_tmp_";
 		const std::wstring userPostfix = L"user"; //temporary
-		const std::wstring profileRoot = std::wstring(_wgetenv(L"SystemRoot")) + L"\\Temp\\RAH\\";
+		const std::wstring profileRoot = std::wstring(_wgetenv(L"SystemRoot")) + L"\\Temp\\.RAH\\";
 		WCHAR szComputerName[MAX_COMPUTERNAME_LENGTH + 1];
 		DWORD dwSize = ARRAYSIZE(szComputerName);
 		DWORD err;
@@ -779,7 +779,7 @@ void print_help() {
 	}
 
 	// Template DeleteUserAndProfile - Under construction
-	// exec: DeleteUserAndProfile(L"RAH_tempUser", L"S-1-5-21-...-1001", L"C:\\Windows\\Temp\\RAH\\RAH_tempUser");
+	// exec: DeleteUserAndProfile(L"RAH_tempUser", L"S-1-5-21-...-1001", L"C:\\Windows\\Temp\\.RAH\\RAH_tempUser");
 	// exec: DeleteUserAndProfile(username, userSID, profilePath);
 
 	std::wstring ToLower(const std::wstring& str) {
@@ -806,7 +806,7 @@ void print_help() {
 			return false;
 		}
 
-		if (profilePathW.find(L"\\RAH\\") == std::wstring::npos) {
+		if (profilePathW.find(L"\\.RAH\\") == std::wstring::npos) {
 			print_error(L"Profile path is outside of expected RAH directory, aborting delete");
 			return false;
 		}
@@ -2556,7 +2556,7 @@ void print_help() {
 		}
 
 		if (debug) {
-			std::wcout << L"\n[DEBUG]: COMMAND RESULTS:\n\n";
+			std::wcout << L"\n[DEBUG]: COMMAND RESULTS:\n";
 		}
 
 		// Read output from process via pipe
@@ -2583,7 +2583,7 @@ void print_help() {
 
 		exitmain:
 
-			if (exitCode == 0) {
+			//if (exitCode == 0) {
 				if (timeoutMs > 0) {
 					Sleep(timeoutMs);
 				}
@@ -2603,7 +2603,7 @@ void print_help() {
 						if (debug) std::wcout << L"[DEBUG]: Temporary user preserved as requested" << std::endl;
 					}
 				}
-			}
+			//}
 			ClearSensitiveData(username, userOnly, domain, password, tempusername, temppassword, cmdLine, command, cmdLineBuf);
 			if (debug) std::wcout << L"\n[DEBUG]: process exited with code " << exitCode << L"\n";
 			return static_cast<int>(exitCode);
