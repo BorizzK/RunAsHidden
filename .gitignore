@@ -34,3 +34,6 @@ Desktop.ini
 
 # Build folders
 build/
+build/ 
+*.exe 
+*.pdb 
