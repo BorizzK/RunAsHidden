@@ -1,9 +1,9 @@
 # RunAsHidden
 
-**Version:** 4.0.2.0  
+**Version:** 4.0.3.0  
 **Author:** [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk/)  
 **License:** MIT  
-**Platform:** Windows 7 / 10 / 11 / Server 2022 (x64 only)
+**Platform:** Windows 7+ / Server 2008 R2+ (x64 only)
 
 ---
 
@@ -19,20 +19,21 @@ RunAs alternative for use in scripts.
 RunAsHidden.exe -u <username> -p <password> [options] -c <command>
 ```
 
-
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `-u`, `--username <username>` | Username: `'user'`, `'domain\\user'`, or `'user@domain'`. <br> `--username=auto` creates a hidden temporary administrator account with an isolated profile in `%SystemRoot%\Temp\RAH\`. The user is deleted after the command completes unless the `-k` option is specified. |
-| `-p`, `--password <password>` | Password. If user logged in and have session, password can be empty (-p=.)<br> `--password=auto` generates a strong random password. |
-| `-k`, `--keep` | Keep the automatically created user for future use. |
-| `-n`, `--nowait` | Do not wait for the command to finish. Returns `0` if the process started successfully, otherwise `1`. |
-| `-t`, `--timeout <time in sec>` | Wait for the specified timeout before the program exits, and before deleting the temporary user and its profile. Can be used in multiple scenarios. |
-| `-d`, `--direct` | Run the command directly (without `cmd.exe /c`). In this mode, shell operators (like `>`) are not interpreted. To capture output, redirect RunAsHidden's own output. |
-| `-v`, `--visible` | Run the command interactively (with a window) in the active session of the logged-on user. |
-| `-debug`, `--debug` | Enable debug output (command line and diagnostics). |
-| `-c`, `--command <command>` | Command line to run (must be the last argument). Quotes inside arguments must be escaped with a backslash (`\\`). |
+| `-u`, `--username <username>` | Target username. Formats:<br> &nbsp;&nbsp;'user' &nbsp;&nbsp;&nbsp;&nbsp;- local user<br> &nbsp;&nbsp;'domain\\user' - domain user<br> &nbsp;&nbsp;'user@domain' - domain user<br> &nbsp;&nbsp;'auto' - automatically create temporary hidden admin user with isolated profile in `%SystemRoot%\Temp\RAH\`. User is deleted after command unless `-k` is specified. |
+| `-p`, `--password <password>` | Password for the user.<br> Can be empty (`-p=.`) for logged-in session.<br> `'auto'` generates a strong random password for temporary user. |
+| `-k`, `--keep` | Keep the automatically created temporary user for future use. |
+| `-n`, `--nowait` | Do not wait for the command to finish.<br> Returns `0` if process started successfully, otherwise `1`. |
+| `-t`, `--timeout <seconds>` | Wait the specified time before exiting and/or deleting temporary user.<br> Maximum allowed: 60 seconds. |
+| `-d`, `--direct` | Run the command directly without `cmd.exe /c`.<br> Shell operators like `>`, `|`, `&` are **not interpreted**.<br> Useful for direct execution or capturing output manually. |
+| `-v`, `--visible` | Run the command interactively (window visible) in the active session. |
+| `-verb`, `--verbose` | Enable small debug output of command details. |
+| `-debug`, `--debug` | Enable debug output, diagnostics, and full command details. |
+| `-c`, `--command <command>` | Command line to execute. Can include full path.<br> Quotes inside must be escaped with backslash (`\\`). |
+| `-params <parameters>` | Optional parameters for the command. Passed exactly as-is.<br> Use quotes if parameters contain spaces; escape internal quotes with `\\`. |
 | `-h`, `--help`, `-?` | Show this help message. |
 
 ---
@@ -41,11 +42,13 @@ RunAsHidden.exe -u <username> -p <password> [options] -c <command>
 
 ```cmd
 RunAsHidden.exe -u user -p pass -c "whoami"
-RunAsHidden.exe --username=domain\\user --password=pass --debug -c "dism.exe /online /get-packages"
-RunAsHidden.exe --username user --password pass --debug -c "dism.exe /online /get-packages"
-RunAsHidden.exe -u user@domain -p pass -c "whoami >\"C:\\Log Files\\whoami.log\""
-RunAsHidden.exe -u=auto -p=auto -debug -c "dism /english /online /get-packages >c:\\dism.log 2>&1"
-RunAsHidden.exe -u=auto -p=auto -c "my_script.bat"
+RunAsHidden.exe -u=domain\\user -p=pass -c "dism.exe /online /get-packages"
+RunAsHidden.exe -u=auto -p=auto -c "\"C:\\Program Files\\app.exe\" -arg1 -arg2"
+RunAsHidden.exe -u=auto -p=auto -c "\"script.cmd\" JJJ \"222\""
+RunAsHidden.exe -u=auto -p=auto -c "\"script.cmd\"" -params="\"222\" 333"      // Equivalent to: "script.cmd" "222" 333
+RunAsHidden.exe -u=auto -p=auto -c "\"Updater.cmd\"" -params="--file=\"C:\\Logs\\log.txt\" --mode=fast"
+RunAsHidden.exe -u auto -p auto -d -c "C:\\Windows\\System32\\whoami.exe"
+RunAsHidden.exe -u auto -p auto -d -t 2 -k -c "whoami"
 ```
 
 ---
