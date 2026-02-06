@@ -1,7 +1,7 @@
 #include <windows.h>
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 4,0,3,0
+FILEVERSION 4,0,5,0
 PRODUCTVERSION 4,0,0,0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
@@ -15,7 +15,7 @@ BEGIN
         BEGIN
             VALUE "CompanyName", ""
             VALUE "FileDescription", "RunAsHidden - Runs a background console process on behalf of the user with arguments. Used to safely install updates from the SYSTEM account using a known or temporary system administrator account."
-            VALUE "FileVersion", "4.0.3.0"
+            VALUE "FileVersion", "4.0.5.0"
             VALUE "InternalName", "RunAsHidden.exe"
             VALUE "LegalCopyright", "Copyright (c) 2025-2026 Borizz.K"
             VALUE "OriginalFilename", "RunAsHidden.exe"

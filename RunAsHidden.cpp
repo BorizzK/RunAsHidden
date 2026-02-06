@@ -1,5 +1,5 @@
 // RunAsHidden.cpp
-// Version 4.0.3
+// Version 4.0.5
 // Author: [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk / https://github.com/BorizzK )
 // Forum: https://forum.ru-board.com/topic.cgi?forum=8&topic=82891#1
 // GitHub: https://github.com/BorizzK/RunAsHidden
@@ -55,8 +55,14 @@
 	std::wstring tempUserProfileW;
 	bool tempUserCreated = false;
 	bool keepTempUser = false;
+	bool runFromGPO = false;
 	
 	PROCESS_INFORMATION g_pi = {0};
+
+	HANDLE g_hPrimaryToken = NULL;
+	LPVOID g_envBlock = NULL;
+	PROFILEINFO g_profileInfo = {0};
+	bool g_profileLoaded = false;
 
 	//----------------------------------------------------------------------------------------------------//
 
@@ -123,7 +129,7 @@ void print_help() {
     L"                                  'domain\\\\user'    - domain user\n"
     L"                                  'user@domain'      - domain user\n"
     L"                                  'auto'             - automatically create temporary hidden admin user\n"
-    L"                                                      with isolated profile in %SystemRoot%\\Temp\\.RAH\\\n"
+    L"                                                      with isolated profile in %SystemRoot%\\Temp\\RAH\\\n"
     L"\n"
     L"  -p, --password <password>       Password for the user.\n"
     L"                                  Can be empty (-p=.) for logged-in session.\n"
@@ -629,7 +635,7 @@ void print_help() {
 		std::wstring username, password, profilePath;
 		const std::wstring userPrefix = L"rah_tmp_";
 		const std::wstring userPostfix = L"user"; //temporary
-		const std::wstring profileRoot = std::wstring(_wgetenv(L"SystemRoot")) + L"\\Temp\\.RAH\\";
+		const std::wstring profileRoot = std::wstring(_wgetenv(L"SystemRoot")) + L"\\Temp\\RAH\\";
 		WCHAR szComputerName[MAX_COMPUTERNAME_LENGTH + 1];
 		DWORD dwSize = ARRAYSIZE(szComputerName);
 		DWORD err;
@@ -779,7 +785,7 @@ void print_help() {
 	}
 
 	// Template DeleteUserAndProfile - Under construction
-	// exec: DeleteUserAndProfile(L"RAH_tempUser", L"S-1-5-21-...-1001", L"C:\\Windows\\Temp\\.RAH\\RAH_tempUser");
+	// exec: DeleteUserAndProfile(L"RAH_tmp_user", L"S-1-5-21-...-1001", L"C:\\Windows\\Temp\\RAH\\RAH_tmp_user");
 	// exec: DeleteUserAndProfile(username, userSID, profilePath);
 
 	std::wstring ToLower(const std::wstring& str) {
@@ -806,7 +812,7 @@ void print_help() {
 			return false;
 		}
 
-		if (profilePathW.find(L"\\.RAH\\") == std::wstring::npos) {
+		if (profilePathW.find(L"\\RAH\\") == std::wstring::npos) {
 			print_error(L"Profile path is outside of expected RAH directory, aborting delete");
 			return false;
 		}
@@ -816,7 +822,25 @@ void print_help() {
 			return false;
 		}
 
-		// 1. Delete user
+		// 1. Destroy environment
+		if (g_envBlock) {
+			DestroyEnvironmentBlock(g_envBlock);
+			g_envBlock = NULL;
+		}
+
+		// 2. Unload profile
+		if (g_profileLoaded) {
+			UnloadUserProfile(g_hPrimaryToken, g_profileInfo.hProfile);
+			g_profileLoaded = false;
+		}
+
+		// 3. Erase token
+		if (g_hPrimaryToken) {
+			SafeCloseHandle(g_hPrimaryToken);
+			g_hPrimaryToken = NULL;
+		}
+
+		// 4. Delete user
 		NET_API_STATUS status = NetUserDel(NULL, usernameW.c_str());
 		if (status != NERR_Success && status != NERR_UserNotFound) {
 			std::wstring msg = std::wstring(L"DeleteUserAndProfile: NetUserDel failed: ") + std::to_wstring(status);
@@ -828,7 +852,7 @@ void print_help() {
 			if (debug) std::wcout << L"[DEBUG]: NetUserDel user: " << usernameW << L" not found\n";
 		}
 
-		// 2. Delete from profilelist
+		// 5. Delete from profilelist
 		HKEY hKey = NULL;
 		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
 						  L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
@@ -847,7 +871,7 @@ void print_help() {
 			success = false;
 		}
 
-		// 3. Delete profile directory
+		// 6. Delete profile directory
 		if (!profilePathW.empty()) {
 			if (!DeleteFileW((profilePathW + L"\\NTUSER.DAT").c_str())) {
 				if (debug) print_warning(L"DeleteUserAndProfile: NTUSER.DAT could not be deleted (probably in use or not found)");
@@ -1118,40 +1142,43 @@ void print_help() {
 			return;
 		}
 
-		if (username)
+		if (username) {
 			std::wcout << L"[DEBUG]: Token privileges for: " << username << L"\n";
+		}
 
+		// --- TokenUser ---
 		DWORD size = 0;
 		GetTokenInformation(hToken, TokenUser, NULL, 0, &size);
 		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
 			print_error(L"PrintTokenPrivileges: GetTokenInformation [TokenUser] buffer size failed");
-			return;
-		}
-
-		BYTE* buffer = new BYTE[size];
-		TOKEN_USER* tokenUser = (TOKEN_USER*)buffer;
-
-		if (GetTokenInformation(hToken, TokenUser, tokenUser, size, &size)) {
-			LPWSTR stringSid = NULL;
-			if (ConvertSidToStringSidW(tokenUser->User.Sid, &stringSid)) {
-				std::wcout << L"[DEBUG]: PrintTokenPrivileges: SID: " << stringSid << L"\n";
-				LocalFree(stringSid);
-			} else {
-				print_error(L"PrintTokenPrivileges: ConvertSidToStringSidW failed");
-			}
 		} else {
-			print_error(L"PrintTokenPrivileges: GetTokenInformation [tokenUser] failed");
+			BYTE* buffer = new BYTE[size];
+			TOKEN_USER* tokenUser = (TOKEN_USER*)buffer;
+
+			if (GetTokenInformation(hToken, TokenUser, tokenUser, size, &size)) {
+				LPWSTR stringSid = NULL;
+				if (ConvertSidToStringSidW(tokenUser->User.Sid, &stringSid)) {
+					std::wcout << L"[DEBUG]: SID: " << stringSid << L"\n";
+					LocalFree(stringSid);
+				} else {
+					print_error(L"PrintTokenPrivileges: ConvertSidToStringSidW failed");
+				}
+			} else {
+				print_error(L"PrintTokenPrivileges: GetTokenInformation [TokenUser] failed");
+			}
+
+			delete[] buffer;
 		}
 
-		delete[] buffer;
-
+		// --- TokenType ---
 		TOKEN_TYPE tokenType;
 		if (GetTokenInformation(hToken, TokenType, &tokenType, sizeof(tokenType), &size)) {
 			std::wcout << L"[DEBUG]: Token type: " << (tokenType == TokenPrimary ? L"Primary" : L"Impersonation") << L"\n";
 		} else {
-			print_error(L"PrintTokenPrivileges: GetTokenInformation [tokenType] failed");
+			print_error(L"PrintTokenPrivileges: GetTokenInformation [TokenType] failed");
 		}
 
+		// --- TokenPrivileges ---
 		DWORD len = 0;
 		GetTokenInformation(hToken, TokenPrivileges, NULL, 0, &len);
 		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
@@ -1168,15 +1195,36 @@ void print_help() {
 
 		for (DWORD i = 0; i < privs->PrivilegeCount; ++i) {
 			LUID luid = privs->Privileges[i].Luid;
+
+			// Privilege name size
 			DWORD nameLen = 0;
-			LookupPrivilegeNameW(NULL, &luid, NULL, &nameLen); // get size
+			LookupPrivilegeNameW(NULL, &luid, NULL, &nameLen);
+			if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+				print_error(L"PrintTokenPrivileges: LookupPrivilegeNameW failed to get size");
+				continue;
+			}
+
+			nameLen++; // for finishing \0
 			std::wstring name(nameLen, L'\0');
+
 			if (LookupPrivilegeNameW(NULL, &luid, &name[0], &nameLen)) {
-				name.resize(nameLen); // clean
-				std::wcout << L"	" << name;
-				if (privs->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED)
+				name.resize(nameLen); // remove unnecessary characters
+				std::wcout << L"    " << name;
+
+				// --- Full attributes output ---
+				DWORD attrs = privs->Privileges[i].Attributes;
+				if (attrs & SE_PRIVILEGE_ENABLED)
 					std::wcout << L" [ENABLED]";
+				if (attrs & SE_PRIVILEGE_ENABLED_BY_DEFAULT)
+					std::wcout << L" [ENABLED_BY_DEFAULT]";
+				if (attrs & SE_PRIVILEGE_REMOVED)
+					std::wcout << L" [REMOVED]";
+				if (attrs & SE_PRIVILEGE_USED_FOR_ACCESS)
+					std::wcout << L" [USED_FOR_ACCESS]";
+
 				std::wcout << L"\n";
+			} else {
+				print_error(L"PrintTokenPrivileges: LookupPrivilegeNameW failed");
 			}
 		}
 
@@ -1524,6 +1572,7 @@ void print_help() {
 			}
 
 			if (lpEnvironment) {
+				if (debug) std::wcout << L"[DEBUG]: RunAsInteractive [SYSTEM]: DestroyEnvironmentBlock(lpEnvironment)\n";
 				DestroyEnvironmentBlock(lpEnvironment);
 			}
 
@@ -1560,6 +1609,7 @@ void print_help() {
 	//=================================================================================================================================================================//
 
 	// FOR HIDDEN RUN FROM SYSTEM V1 - STANDARD with login
+
 	bool RunUnderSystem(
 		const std::wstring& userOnly,
 		const std::wstring& domain,
@@ -1585,9 +1635,9 @@ void print_help() {
 			if (userSessionId != 0xFFFFFFFF) {
 				// Сессия существует — получаем токен пользователя
 				if (!WTSQueryUserToken(userSessionId, &hPrimaryToken)) {
-					if (debug) std::wcout << L"[DEBUG]: WTSQueryUserToken failed, fallback to LogonUserW\n";
+					if (debug) std::wcout << L"[DEBUG]: RunUnderSystem: WTSQueryUserToken failed, fallback to LogonUserW\n";
 				} else {
-					if (debug) std::wcout << L"[DEBUG]: Obtained token from existing session " << userSessionId << L"\n";
+					if (debug) std::wcout << L"[DEBUG]: RunUnderSystem: Obtained token from existing session " << userSessionId << L"\n";
 				}
 			}
 		//
@@ -1669,6 +1719,29 @@ void print_help() {
 			wcscpy(windowsDir, L"C:\\Windows");
 		}
 
+		if (debug) {
+			std::wcout << L"[DEBUG]: RunUnderSystem: CreateProcess Parameters\n";
+			std::wcout << L"  runFromGPO flag: " << runFromGPO << L"\n";
+			std::wcout << L"  hPrimaryToken: " << hPrimaryToken << L"\n";
+			std::wcout << L"  lpApplicationName: " << (LPCVOID)nullptr << L"\n";
+			std::wcout << L"  lpCommandLine: " << cmdLine << L"\n";
+			std::wcout << L"  bInheritHandles: " << TRUE << L"\n";
+
+			std::wcout << L"  creationFlags: 0x" << std::hex << (creationFlags | CREATE_UNICODE_ENVIRONMENT) << L"\n";
+			std::wcout << L"  envBlock: " << (LPVOID)envBlock << L"\n";
+			std::wcout << L"  lpCurrentDirectory: " << windowsDir << L"\n";
+
+			std::wcout << L"  si.cb: " << si.cb << L"\n";
+			std::wcout << L"  si.dwFlags: 0x" << std::hex << si.dwFlags << L"\n";
+			std::wcout << L"  si.lpDesktop: " << (si.lpDesktop ? si.lpDesktop : L"(NULL)") << L"\n";
+			std::wcout << L"  si.hStdInput: " << si.hStdInput << L"\n";
+			std::wcout << L"  si.hStdOutput: " << si.hStdOutput << L"\n";
+			std::wcout << L"  si.hStdError: " << si.hStdError << L"\n";
+
+			std::wcout << L"[DEBUG]: End of parameters\n";
+		}
+
+		if (debug) std::wcout << L"[DEBUG]: RunUnderSystem: CreateProcessAsUserW\n";
 		created = CreateProcessAsUserW(
 			hPrimaryToken,
 			NULL,
@@ -1685,12 +1758,17 @@ void print_help() {
 
 		if (!created) {
 			print_error(L"RunUnderSystem: CreateProcessAsUserW failed");
+			DestroyEnvironmentBlock(envBlock);
+			if (profileloaded) UnloadUserProfile(hPrimaryToken, up.hProfile);
+			SafeCloseHandle(hPrimaryToken);
+			SafeCloseHandle(hToken);
+			return false;
 		}
 
-		DestroyEnvironmentBlock(envBlock);
-		if (profileloaded) UnloadUserProfile(hPrimaryToken, up.hProfile);
-		SafeCloseHandle(hPrimaryToken);
-		SafeCloseHandle(hToken);
+		g_hPrimaryToken = hPrimaryToken;
+		g_envBlock = envBlock;
+		g_profileInfo = up;
+		g_profileLoaded = profileloaded;
 
 		return created;
 	}
@@ -1984,6 +2062,7 @@ void print_help() {
 		std::wstring username, userOnly, password, domain, tempusername, temppassword, commandPath, command, cmdparams, timeoutS;
 		int timeoutMs = 0;
 		debug = false; // GLOBAL
+		bool readPipe = true;
 		bool verb = false;
 		bool visible = false;
 		bool nowait = false;
@@ -2023,31 +2102,6 @@ void print_help() {
 		for (int i = 1; i < argc; ++i) {
 			std::wstring arg = argv[i];
 
-			if (arg == L"-h" || arg == L"--help" || arg == L"-?") {
-				print_help();
-				goto exitmain;
-			}
-
-			if (arg == L"-silent" || arg == L"--silent" || arg == L"-s") {
-				silent = true;
-				continue;
-			}
-
-			if (arg == L"-debug" || arg == L"--debug") {
-				debug = true;
-				continue;
-			}
-
-			if (arg == L"-nowait" || arg == L"--nowait" || arg == L"-n") {
-				nowait = true;
-				continue;
-			}
-
-			if (arg == L"-verb" || arg == L"--verb" || arg == L"-verbose" || arg == L"--verbose") {
-				verb = true;
-				continue;
-			}
-
 			// helpers extract vals
 				auto extract_value = [&](const std::wstring &a, int &idx, std::wstring &out) -> bool {
 					size_t pos = a.find(L'=');
@@ -2074,6 +2128,47 @@ void print_help() {
 					return true;
 				};
 			// helpers extract vals end
+
+			if (arg == L"-h" || arg == L"--help" || arg == L"-?") {
+				print_help();
+				goto exitmain;
+			}
+
+			if (arg == L"-query-procs" || arg == L"--query-procs") {
+				queryUserProcs = true;
+				has_command = true;
+				break;
+			}
+
+			if (arg == L"-silent" || arg == L"--silent" || arg == L"-s") {
+				silent = true;
+				continue;
+			}
+
+			if (arg == L"-debug" || arg == L"--debug") {
+				debug = true;
+				continue;
+			}
+
+			if (arg == L"-nowait" || arg == L"--nowait" || arg == L"-n") {
+				nowait = true;
+				continue;
+			}
+
+			if (arg == L"-verb" || arg == L"--verb" || arg == L"-verbose" || arg == L"--verbose") {
+				verb = true;
+				continue;
+			}
+
+			if (arg == L"-no-output" || arg == L"--no-output") {
+				readPipe = false;
+				continue;
+			}
+
+			if (arg == L"-gpo" || arg == L"--gpo") {
+				runFromGPO = true;
+				continue;
+			}
 
 			// timeout
 			if (arg == L"-t" || arg == L"-timeout" || arg == L"--timeout" ||
@@ -2124,12 +2219,6 @@ void print_help() {
 					goto exitmain;
 				}
 				continue;
-			}
-
-			if (arg == L"-query-procs" || arg == L"--query-procs") {
-				queryUserProcs = true;
-				has_command = true;
-				break;
 			}
 
 			// command
@@ -2478,19 +2567,24 @@ void print_help() {
 
 		sa = { sizeof(SECURITY_ATTRIBUTES), NULL, true };
 
-		if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
-			print_error(L"CreatePipe failed");
-			exitCode = 1;
-			goto exitmain;
+		if (readPipe) {
+			if (!CreatePipe(&hRead, &hWrite, &sa, 0)) {
+				print_error(L"CreatePipe failed");
+				exitCode = 1;
+				goto exitmain;
+			}
+			if (!SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0)) {
+				print_error(L"SetHandleInformation failed");
+				SafeCloseHandle(hRead);
+				SafeCloseHandle(hWrite);
+				exitCode = 1;
+				goto exitmain;
+			}
+			si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+			si.hStdOutput = hWrite;
+			si.hStdError = hWrite;
 		}
-
-		if (!SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0)) {
-			print_error(L"SetHandleInformation failed");
-			SafeCloseHandle(hRead);
-			SafeCloseHandle(hWrite);
-			exitCode = 1;
-			goto exitmain;
-		}
+		si.wShowWindow = SW_HIDE;
 
 		// Ctrl+C - а надо ли это вообще? ну пусть будет
 		if (!SetConsoleCtrlHandler(CtrlHandler, true)) {
@@ -2500,11 +2594,6 @@ void print_help() {
 			exitCode = 1;
 			goto exitmain;
 		}
-
-		si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
-		si.wShowWindow = SW_HIDE;
-		si.hStdOutput = hWrite;
-		si.hStdError = hWrite;
 
 		if (RunAsCurrentUser) {
 			created = RunUnderCurrentUser(
@@ -2560,14 +2649,16 @@ void print_help() {
 		}
 
 		// Read output from process via pipe
-		while (true) {
-			BOOL success = ReadFile(hRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
-			if (!success || bytesRead == 0) break;
-			std::string current(buffer, bytesRead);
-			if (current != prev) {
-				std::cout.write(current.c_str(), current.size());
-				std::cout.flush();
-				prev = current;
+		if (readPipe) {
+			while (true) {
+				BOOL success = ReadFile(hRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
+				if (!success || bytesRead == 0) break;
+				std::string current(buffer, bytesRead);
+				if (current != prev) {
+					std::cout.write(current.c_str(), current.size());
+					std::cout.flush();
+					prev = current;
+				}
 			}
 		}
 		SafeCloseHandle(hRead);
@@ -2583,27 +2674,27 @@ void print_help() {
 
 		exitmain:
 
-			//if (exitCode == 0) {
 				if (timeoutMs > 0) {
 					Sleep(timeoutMs);
 				}
 
-				if (autouser) {
-					if (!keepTempUser) {
-						if (tempUserCreated) {
+				if (!nowait) {
+					if (autouser) {
+						if (!keepTempUser) {
+							if (tempUserCreated) {
+								std::wcout << L"\n";
+								if (timeoutMs <= 0) Sleep(2500);
+								DeleteUserAndProfile(tempUserW, tempUserSidW, tempUserProfileW);
+								SecureClear(tempUserW);
+								SecureClear(tempUserSidW);
+								SecureClear(tempUserProfileW);
+							}
+						} else {
 							std::wcout << L"\n";
-							if (timeoutMs <= 0) Sleep(2500);
-							DeleteUserAndProfile(tempUserW, tempUserSidW, tempUserProfileW);
-							SecureClear(tempUserW);
-							SecureClear(tempUserSidW);
-							SecureClear(tempUserProfileW);
+							if (debug) std::wcout << L"[DEBUG]: Temporary user preserved as requested" << std::endl;
 						}
-					} else {
-						std::wcout << L"\n";
-						if (debug) std::wcout << L"[DEBUG]: Temporary user preserved as requested" << std::endl;
 					}
 				}
-			//}
 			ClearSensitiveData(username, userOnly, domain, password, tempusername, temppassword, cmdLine, command, cmdLineBuf);
 			if (debug) std::wcout << L"\n[DEBUG]: process exited with code " << exitCode << L"\n";
 			return static_cast<int>(exitCode);
