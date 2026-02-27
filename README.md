@@ -1,6 +1,6 @@
 # RunAsHidden
 
-**Version:** 4.0.3.0  
+**Version:** 4.0.7.2  
 **Author:** [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk/)  
 **License:** MIT  
 **Platform:** Windows 7+ / Server 2008 R2+ (x64 only)
