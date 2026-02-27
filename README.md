@@ -49,6 +49,10 @@ RunAsHidden.exe -u=auto -p=auto -c "\"script.cmd\"" -params="\"222\" 333"      /
 RunAsHidden.exe -u=auto -p=auto -c "\"Updater.cmd\"" -params="--file=\"C:\\Logs\\log.txt\" --mode=fast"
 RunAsHidden.exe -u auto -p auto -d -c "C:\\Windows\\System32\\whoami.exe"
 RunAsHidden.exe -u auto -p auto -d -t 2 -k -c "whoami"
+RunAsHidden.exe -u=auto -p=auto -debug -c "chcp 437 && C:\\Windows\\System32\\dism.exe && chcp 866"
+RunAsHidden.exe -u=auto -p=auto -debug -c "chcp 437 && C:\Windows\System32\dism.exe && chcp 866"
+RunAsHidden.exe -u user1 -p=. -v -d -debug -c "explorer.exe \\server\share" // Open folder \\server\shar in explorer window under user user1 session
+RunAsHidden.exe -u user1 -p=. -v -d -debug -c "c:\Program Files\Microsoft Office\Office16\Outlook.exe" // Open Outlook under user user1 interactive session
 ```
 
 ---
