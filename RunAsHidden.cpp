@@ -1,5 +1,5 @@
 // RunAsHidden.cpp
-// Version 4.0.7.2
+// Version 4.5.2.0
 // Author: [BorizzK](https://github.com/BorizzK / https://s-platoon.ru/profile/14721-borizzk / https://github.com/BorizzK )
 // Forum: https://forum.ru-board.com/topic.cgi?forum=8&topic=82891#1
 // GitHub: https://github.com/BorizzK/RunAsHidden
@@ -29,6 +29,7 @@
 	#include <sddl.h>
 	#include <iostream>
 	#include <string>
+	#include <random> //rand
 	#include <vector>
 	#include <sstream>
 	#include <wtsapi32.h>
@@ -43,19 +44,44 @@
 	#include <ctime>
 	//#include <Shlwapi.h> //PathFileExistsW
 	//#pragma comment(lib, "Shlwapi.lib") //PathFileExistsW
+	//#pragma comment(lib, "netapi32.lib") //NetUserModalsGet
 	#ifndef ERROR_USER_PROFILE_ALREADY_LOADED
 	#define ERROR_USER_PROFILE_ALREADY_LOADED 1500
 	#endif
 
+	//1. Доработка - вместо глобальных переменных - struct RahContext - в работе
+	//2. Handles - проверить ВСЕ
+
+	const DWORD WAIT_PROC_HOURS_DEFAULT = 12;
+
+	const std::wstring g_userListKey = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\SpecialAccounts\\UserList";
+	const std::wstring g_profileRegKey = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList";
+	const std::wstring g_RahRootDirName = L"\\RAH\\";
+	const std::wstring g_RahTempRootDirPath = L"\\Temp" + g_RahRootDirName;
+	const std::wstring g_tmpUserPrefix =  L"rah_tmp_";
+	const std::wstring g_tmpUserPostfix = L"user";
+	const std::wstring g_RahUserComment = L"Temporary user created by RunAsHidden administrative utility";
+	const size_t g_DefaultPassLen = 12;
+	const wchar_t CHARSET_PWD[129] = L"AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789~`!@#$%^&*()_=+-'{}[];:,.?<>\\/abcdefghijklmnopqrstuvwxyz9876543210";
+	const wchar_t CHARSET_PFX[129] = L"AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789#$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz9876543210$#";
+
 	bool debug = false;
+	bool privdebug = false;
 	bool isSystem = false;
 	bool isImpersonated = false;
+	std::wstring tempUserNameW;
 	std::wstring tempUserW;
 	std::wstring tempUserSidW;
 	std::wstring tempUserProfileW;
 	bool tempUserCreated = false;
-	bool keepTempUser = false;
-	bool runFromGPO = false;
+	bool g_keepTempUser = false; // -k / -keep
+	bool g_tempuser_fallback = true;
+	bool g_noWait = false; // -n / -nowait
+	bool g_runFromGPO = false;
+	bool g_cleanup_mode = false; // -cleanup
+	bool g_cleanupall_mode = false; // -cleanup-all
+	bool g_cl_on = false; // -cl
+	bool g_cla_on = false; // -cla
 	
 	PROCESS_INFORMATION g_pi = {0};
 
@@ -119,50 +145,97 @@
 	//----------------------------------------------------------------------------------------------------//
 
 	void print_help() {
-		std::wcout << L"RunAsHidden Version: " << GetFileVersion() << L"\n\n";
-
 		std::wcout <<
 		L"Usage:\n"
-		L"  RunAsHidden.exe -u <username> -p <password> [options] -c <command> [-params <parameters>]\n\n"
-
+		L"\n"
+		L"  RunAsHidden.exe -u <username> -p <password> [options] -c <command> [-params <parameters>]\n"
+		L"\n"
 		L"Options:\n"
 		L"  -u, --username <username>       Target username. Formats:\n"
-		L"                                  'user'             - local user\n"
-		L"                                  'domain\\\\user'    - domain user\n"
-		L"                                  'user@domain'      - domain user\n"
-		L"                                  'auto'             - automatically create temporary hidden admin user\n"
-		L"                                                      with isolated profile in %SystemRoot%\\Temp\\RAH\\\n"
+		L"                                  'user'           - local user\n"
+		L"                                  'domain\\user'    - domain user\n"
+		L"                                  'user@domain'    - domain user\n"
+		L"                                  '.'              - current user (Use with the -p=. option)\n"
+		L"                                  'auto'           - automatically create temporary hidden admin user\n"
+		L"                                                     with isolated profile in %SystemRoot%\\Temp\\RAH\\ folder\n"
+		L"                                                     By default, uses base name 'rah_tmp_user_' with 8\n"
+		L"                                                     random characters appended (random suffix).\n"
+		L"                                                     Example: rah_tmp_user_89nvDoQF\n"
+		L"                                                     This user will always be removed after execution.\n"
 		L"\n"
 		L"  -p, --password <password>       Password for the user.\n"
-		L"                                  Can be empty (-p=.) for logged-in session.\n"
-		L"                                  'auto' generates a strong random password for temporary user.\n"
+		L"                                  Can be empty (-p=.) to use the current session.\n"
+		L"                                  'auto' generates a strong random password for temporary hidden admin user.\n"
 		L"\n"
-		L"  -k, --keep                      Keep the automatically created temporary user for future use.\n"
+		L"  -tn, --tempusername <username>  Used only with -u=auto option. Specifies the base name\n"
+		L"                                  for the temporary hidden admin user.\n"
+		L"                                  By default, 8 random characters are appended to ensure uniqueness:\n"
+		L"                                  -tn=username (max 11 charecters) => username_89nvDoQF\n"
+		L"                                  Using -tn with random suffix enabled automatically disables -k (--keep),\n"
+		L"                                  so the temporary user and profile will always be removed.\n"
+		L"                                  To disable random suffix generation, append a dot (.) to the name:\n"
+		L"                                  -tn=username. (max 20 charecters without dot) => username\n"
+		L"\n"
+		L"  -k, --keep                      Keep the automatically created temporary hidden admin user\n"
+		L"                                  for future use. Can only be used with -tn when random suffix is disabled\n"
+		L"                                  (i.e., name ends with a dot).\n"
+		L"\n"
+		L"  -nofb, --nofb                   Disables automatic fallback to a new randomized username if the specified\n"
+		L"                                  name (options -tn / -u ) is already taken by an existing non-temporary user.\n"
+		L"                                  By default, if the utility cannot reuse an existing user (due to a name\n"
+		L"                                  conflict or missing 'temporary' registry flag), it will create a new temporary\n"
+		L"                                  hidden admin user with a random suffix (<username>_$random$) to ensure your\n"
+		L"                                  scenario continues without interruption.\n"
+		L"\n"
+		L"                                  name (option -tn) is exists.\n"
+		L"                                  (i.e., name ends with a dot).\n"
 		L"\n"
 		L"  -n, --nowait                    Do not wait for the command to finish.\n"
 		L"                                  Returns 0 if process started successfully, otherwise 1.\n"
+		L"                                  Incompatible with temporary admin user (options -u=auto, -tn).\n"
 		L"\n"
 		L"  -t, --timeout <seconds>         Wait the specified time before exiting and/or deleting temporary user.\n"
 		L"                                  Maximum allowed: 60 seconds.\n"
 		L"\n"
-		L"  -d, --direct                    Run the command directly without 'cmd.exe /c'.\n"
+		L"  -d, --direct                    Run the command directly without 'cmd.exe /d /c'.\n"
 		L"                                  Shell operators like >, |, & are not interpreted.\n"
 		L"                                  Useful for direct execution or capturing output manually.\n"
 		L"\n"
-		L"  -v, --visible                   Run the command interactively (window visible) in the active session.\n"
+		L"  -v, --visible                   Run the command interactively (window visible) in the active session\n"
+		L"                                  of the specified user\n"
 		L"\n"
 		L"  -verb, --verbose                Enable small debug output of command details.\n"
 		L"\n"
-		L"  -debug, --debug                 Enable debug output, diagnostics, and command details.\n"
+		L"  -debug, --debug                 Enable full debug output, diagnostics, and command details.\n"
 		L"\n"
 		L"  -c, --command <command>         Command line to execute. Can include full path.\n"
 		L"                                  Quotes inside must be escaped with backslash (\\\\).\n"
 		L"\n"
 		L"  -params <parameters>            Optional parameters for the command. Passed exactly as-is.\n"
-		L"                                  Use quotes if parameters contain spaces, escape internal quotes with \\\\.\n"
+		L"                                  Use quotes if parameters contain spaces; escape internal quotes with \\\\.\n"
 		L"\n"
-		L"  -h, --help, -?                  Show this help message.\n\n"
-
+		L"  -cleanup, --cleanup             Removes previously created temporary users\n"
+		L"                                  (excluding those created with the -k option)\n"
+		L"                                  that were not removed automatically. Cannot be\n"
+		L"                                  use with other options.\n"
+		L"\n"
+		L"  -cleanup-all, --cleanup-all     Removes previously created temporary users\n"
+		L"                                  (including those created with the -k option)\n"
+		L"                                  that were not removed automatically. Cannot be\n"
+		L"                                  use with other options.\n"
+		L"\n"
+		L"  -cl, --cl                       Can be use with other options. Removes previously\n"
+		L"                                  created temporary users (excluding those created\n"
+		L"                                  with the -k option) that were not removed automatically.\n"
+		L"                                  Temorary users will be removed before execution command.\n"
+		L"\n"
+		L"  -cla, --cla                     Can be use with other options. Removes previously\n"
+		L"                                  created temporary users (excluding those created \n"
+		L"                                  with the -k option) that were not removed automatically.\n"
+		L"                                  Temorary users will be removed before execution command.\n"
+		L"\n"
+		L"  -h, --help, -?                  Show this help message.\n"
+		L"\n"
 		L"Examples:\n"
 		L"  RunAsHidden.exe -u user -p pass -c \"whoami\"\n"
 		L"  RunAsHidden.exe -u=domain\\\\user -p=pass -c \"dism.exe /online /get-packages\"\n"
@@ -171,9 +244,10 @@
 		L"  RunAsHidden.exe -u=auto -p=auto -c \"\\\"script.cmd\\\"\" -params=\"\\\"222\\\" 333\"\n"
 		L"      // Equivalent to: \"script.cmd\" \"222\" 333\n"
 		L"  RunAsHidden.exe -u=auto -p=auto -c \"\\\"Updater.cmd\\\"\" -params=\"--file=\\\"C:\\\\Logs\\\\log.txt\\\" --mode=fast\"\n"
-		L"  RunAsHidden.exe -u auto -p auto -d -c \"C:\\\\Windows\\\\System32\\\\whoami.exe\"\n"
-		L"  RunAsHidden.exe -u auto -p auto -d -t 2 -k -c \"whoami\"\n";
-		std::wcout.flush();
+		L"  RunAsHidden.exe -u=auto -p=auto -d -c \"C:\\\\Windows\\\\System32\\\\whoami.exe\"\n"
+		L"  RunAsHidden.exe -u=auto -p=auto -d -t 2 -k -c \"whoami\"\n"
+		L"  RunAsHidden.exe -u=auto -p=auto -tn=tempuser. -d -k -c \"whoami\" // keep temporary user\n"
+		L"  RunAsHidden.exe -u=auto -p=auto -tn=tempuser -c \"whoami\" // random suffix, user tempuser will be deleted after execution command\n";
 	}
 
 	//=================================================================================================================================================================//
@@ -181,19 +255,15 @@
 
 	void print_str(const std::wstring& msg) {
 		std::wcout << msg << L"\n";
-		std::wcout.flush();
 	}
 
-	void print_err(const std::wstring& msg) {
-		std::wcerr << msg << L'\n';
-		std::wcerr.flush();
-	}
-
-	void print_warning(const std::wstring& warningMessage) {
+	template<typename... Args>
+	inline void print_warning(const Args&... args) {
 		DWORD werr = GetLastError();
 		std::wostringstream msg;
-		msg << L"[WARNING]: " << warningMessage
-			<< L": code: " << werr;
+		msg << L"[WARNING]: ";
+		(msg << ... << args);
+		if (werr != 0) msg	<< L": code: " << werr;
 		print_str(msg.str());
 	}
 
@@ -213,76 +283,33 @@
 		if constexpr (sizeof...(Args) > 0) {
 			(msg << ... << args);
 		}
-		if (err != 0) {
-			msg << L" (error code: " << err << L")";
-		}
 		switch (err) {
-			case 0:
-				errorMessage = msg.str();
-				break;
-
 			case ERROR_ACCESS_DENIED:
 				errorMessage = L"Access denied";
 				break;
-
 			case ERROR_LOGON_FAILURE:
 				errorMessage = L"Incorrect username or password";
 				break;
-
 			case ERROR_ACCOUNT_RESTRICTION:
 				errorMessage = L"Account restrictions prevent login";
 				break;
-
 			case ERROR_LOGON_TYPE_NOT_GRANTED:
 				errorMessage = L"Logon type not granted";
 				break;
-
 			case ERROR_PRIVILEGE_NOT_HELD:
 				errorMessage = L"Required privilege not held";
 				break;
-
 			default:
-				errorMessage = msg.str();
 				break;
 		}
 		if (!errorMessage.empty()) {
-			print_err(L"[ERROR]: " + errorMessage);
+			msg << L": " << errorMessage;
 		}
-	}
-
-	void print_net_error(const std::wstring& neterrorMessage, NET_API_STATUS status) {
-		std::wstring errorMessage;
-
-		switch (status) {
-			case NERR_InvalidComputer:
-				errorMessage = L"Invalid computer name";
-				break;
-			case NERR_NotPrimary:
-				errorMessage = L"Operation allowed only on the primary domain controller";
-				break;
-			case NERR_UserExists:
-				errorMessage = L"User account already exists";
-				break;
-			case NERR_PasswordTooShort:
-				errorMessage = L"Password is too short";
-				break;
-			case NERR_PasswordTooRecent:
-				errorMessage = L"Password was changed recently";
-				break;
-			case NERR_GroupNotFound:
-				errorMessage = L"Specified group not found";
-				break;
-			default: {
-				std::wostringstream msg;
-				msg << neterrorMessage << L": Code: " << status;
-				errorMessage = msg.str();
-				break;
-			}
+		if (err != 0) {
+			msg << L" [error code: " << err << L"]";
 		}
 
-		if (!errorMessage.empty()) {
-			print_err(L"[ERROR]: " + errorMessage);
-		}
+		print_str(L"[ERROR]: " + msg.str());
 	}
 
 	//=================================================================================================================================================================//
@@ -338,619 +365,44 @@
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
 
-	//****************************************************************************************************//
-
-	std::wstring GenerateRandomString(size_t length) {
-		const wchar_t charset[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-		std::wstring result;
-		result.reserve(length);
-		srand((unsigned)time(NULL) ^ GetTickCount());
-		for (size_t i = 0; i < length; ++i) {
-			result += charset[rand() % (sizeof(charset)/sizeof(wchar_t) - 1)];
-		}
-		return result;
+	bool IsDirectoryExists(const std::wstring& path) {
+		if (path.empty()) return false;
+		DWORD dirAttrib = GetFileAttributesW(path.c_str());
+		return (dirAttrib != INVALID_FILE_ATTRIBUTES && (dirAttrib & FILE_ATTRIBUTE_DIRECTORY));
 	}
 
-	//****************************************************************************************************//
-
-	// RtlGenRandom [SystemFunction036]
-	extern "C" BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer, ULONG RandomBufferLength);
-	void GenerateRandomPassword(size_t length, std::wstring& genpassword) {
-		const wchar_t charset[] = L"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+";
-		const size_t charset_size = sizeof(charset) / sizeof(wchar_t) - 1;
-
-		std::vector<BYTE> buf(length);
-		bool crypto_ok = RtlGenRandom(buf.data(), (ULONG)buf.size()) != false;
-
-		genpassword.clear();
-		genpassword.reserve(length);
-
-		if (crypto_ok) {
-			// Криптоустойчивый способ
-			for (size_t i = 0; i < length; ++i) {
-				genpassword += charset[ buf[i] % charset_size ];
-			}
-		} else {
-			// Fallback на rand()
-			srand((unsigned)time(NULL) ^ GetTickCount());
-			for (size_t i = 0; i < length; ++i) {
-				genpassword += charset[rand() % charset_size];
-			}
-		}
+	bool IsFileExists(const std::wstring& path, const std::wstring& filename) {
+		if (path.empty() || filename.empty()) return false;
+		std::wstring fullPath = path + L"\\" + filename;
+		DWORD fileAttrib = GetFileAttributesW(fullPath.c_str());
+		return (fileAttrib != INVALID_FILE_ATTRIBUTES && !(fileAttrib & FILE_ATTRIBUTE_DIRECTORY));
 	}
 
-	//****************************************************************************************************//
-
-	//----------------------------------------------------------------------------------------------------//
-
-	bool GetSIDFromUsername(const std::wstring& username, PSID* ppSid) {
-		if (!ppSid) return false;
-		*ppSid = nullptr; //Reset
-
-		DWORD sidSize = 0, domainSize = 0;
-		SID_NAME_USE use;
-
-		// Get buffer sizes
-		LookupAccountNameW(NULL, username.c_str(), NULL, &sidSize, NULL, &domainSize, &use);
-		DWORD err = GetLastError();
-		if (err != ERROR_INSUFFICIENT_BUFFER) {
-			print_error(L"GetSIDFromUsername: Initial LookupAccountNameW failed [not buffer error]");
-			return false;
+	bool CreateTagFile(const std::wstring& path, const std::wstring& filename) {
+		if (path.empty() || filename.empty()) return false;
+		std::wstring fullPath = path + L"\\" + filename;
+		HANDLE hFile = CreateFileW(fullPath.c_str(),GENERIC_WRITE,0,NULL,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,NULL);
+		if (hFile == INVALID_HANDLE_VALUE) {
+			return false; 
 		}
-
-		std::vector<BYTE> sidBuffer(sidSize);
-		std::vector<wchar_t> domainBuffer(domainSize);
-
-		// Get SID
-		if (!LookupAccountNameW(NULL, username.c_str(),
-			sidBuffer.data(), &sidSize,
-			domainBuffer.data(), &domainSize, &use)) {
-			print_error(L"GetSIDFromUsername: LookupAccountNameW failed");
-			return false;
-		}
-
-		// Copy sid to mem
-		*ppSid = (PSID)LocalAlloc(LPTR, sidSize);
-		if (!*ppSid) {
-			print_error(L"GetSIDFromUsername: LocalAlloc failed");
-			return false;
-		}
-		CopyMemory(*ppSid, sidBuffer.data(), sidSize);
-
-		LPWSTR sidString = NULL;
-		if (ConvertSidToStringSidW(*ppSid, &sidString)) {
-			if (debug) print_debug(L"Retrieved User SID: ", sidString);
-			LocalFree(sidString);
-			return true;
-		}
-		LocalFree(sidString);
-		LocalFree(*ppSid); //reset
-		*ppSid = nullptr; //reset
- 		print_error(L"GetSIDFromUsername: FAILED");
-		return false;
-	}
-
-	bool AddUserToAdminsLocalGroup(const std::wstring& username) {
-
-		const wchar_t* adminGroupSidStr = L"S-1-5-32-544";
-		PSID pAdminGroupSid = nullptr;
-
-		if (!ConvertStringSidToSidW(adminGroupSidStr, &pAdminGroupSid)) {
-			std::wstring msg = std::wstring(L"AddUserToAdminsLocalGroup: Failed to convert SID string: ") + adminGroupSidStr;
-			print_error(msg.c_str());
-			return false;
-		}
-
-		WCHAR groupName[256], domainName[256];
-		DWORD groupNameSize = ARRAYSIZE(groupName);
-		DWORD domainNameSize = ARRAYSIZE(domainName);
-		SID_NAME_USE sidUse;
-		if (!LookupAccountSidW(nullptr, pAdminGroupSid, groupName, &groupNameSize, domainName, &domainNameSize, &sidUse)) {
-			print_error(L"AddUserToAdminsLocalGroup: LookupAccountSidW failed");
-			LocalFree(pAdminGroupSid);
-			return false;
-		}
-
-		std::wstring fullGroupName = groupName;
-		LOCALGROUP_MEMBERS_INFO_3 memberInfo;
-		memberInfo.lgrmi3_domainandname = const_cast<LPWSTR>(username.c_str());
-		NET_API_STATUS status = NetLocalGroupAddMembers(
-			nullptr,                     // local computer
-			fullGroupName.c_str(),       // group
-			3,                           // level struct
-			(LPBYTE)&memberInfo,         // data
-			1                            // element
-		);
-		std::wstring statusText = std::to_wstring(status);
-		if (debug) print_debug(L"NetLocalGroupAddMembers status ", statusText);
-		if (status == NERR_Success) {
-			if (debug) print_debug(L"Successfully added user ", username, L" to local administrators group");
-		} else if ( status == ERROR_MEMBER_IN_ALIAS ) {
-			if (debug) print_debug(L"User ", username, L" already in local administrators group");
-		} else {
-			print_error(L"AddUserToAdminsLocalGroup: NetLocalGroupAddMembers failed to add user ", username, L" to local administrators group");
-			LocalFree(pAdminGroupSid);
-			return false;
-		}
-		LocalFree(pAdminGroupSid);
+		CloseHandle(hFile);
 		return true;
 	}
 
-	bool CreateLocalUser(const std::wstring& username, const std::wstring& password, const std::wstring& profileDir ) {
-		
-		USER_INFO_1 ui;
-		NET_API_STATUS nStatus;
 
-		ZeroMemory(&ui, sizeof(ui));
-		ui.usri1_name = const_cast<LPWSTR>(username.c_str());
-		ui.usri1_password = const_cast<LPWSTR>(password.c_str());
-		ui.usri1_priv = USER_PRIV_USER;
-		//ui.usri1_home_dir = NULL;
-		ui.usri1_home_dir = const_cast<LPWSTR>(profileDir.c_str());
-		ui.usri1_comment = const_cast<LPWSTR>(L"Temporary user created by RunAsHidden");
-		ui.usri1_flags = UF_SCRIPT | UF_DONT_EXPIRE_PASSWD;
-		ui.usri1_script_path = NULL;
-
-		nStatus = NetUserAdd(NULL, 1, (LPBYTE)&ui, NULL);
-
-		if (nStatus == NERR_Success) {
-			if (debug) print_debug(L"", username, L" created successfully");
-		} else if (nStatus == NERR_UserExists) {
-			if (debug) print_debug(L"User: ", username, L" already exists, changing password");
-			USER_INFO_1003 uiPwd;
-			uiPwd.usri1003_password = const_cast<LPWSTR>(password.c_str());
-			NET_API_STATUS pwdStatus = NetUserSetInfo(NULL, username.c_str(), 1003, (LPBYTE)&uiPwd, NULL);
-			if (pwdStatus == NERR_Success) {
-				if (debug) print_debug(L"Password changed successfully for user: ", username);
-			} else {
-				std::wstring msg = std::wstring(L"Failed to change password for user: ") + username;
-				print_error(msg.c_str());
-				return false;
-			}
-		} else {
-			std::wstring msg = std::wstring(L"CreateLocalUser: Failed to create user: ") + username;
-			print_error(msg.c_str());
-			return false;
-		}
-		
-		if (!AddUserToAdminsLocalGroup(username)) {
-			return false;
-		}
-		if (debug) print_debug(L"Successfully add user: ", username, L" to local administrators group");
-
-		return true;
-	}
-
-	// PROFILE
-
-		bool CopyDirectoryRecursive(const std::wstring& source, const std::wstring& dest) {
-
-			WIN32_FIND_DATAW findData{};
-			HANDLE hFind = INVALID_HANDLE_VALUE; // init
-
-			DWORD attr = GetFileAttributesW(dest.c_str());
-			if (attr == INVALID_FILE_ATTRIBUTES) {
-				if (!CreateDirectoryW(dest.c_str(), NULL)) {
-					if (GetLastError() != ERROR_ALREADY_EXISTS) {
-						print_error(L"CopyDirectoryRecursive: Failed to create directory");
-						return false;
-					}
-				}
-			}
-
-			std::wstring searchPath = source + L"\\*";
-
-			hFind = FindFirstFileW(searchPath.c_str(), &findData);
-			if (hFind == INVALID_HANDLE_VALUE) {
-				print_error(L"CopyDirectoryRecursive: FindFirstFile failed");
-
-				return false;
-			}
-
-			do {
-				const std::wstring itemName = findData.cFileName;
-
-				if (itemName == L"." || itemName == L"..") continue;
-
-				std::wstring sourcePath = source + L"\\" + itemName;
-				std::wstring destPath = dest + L"\\" + itemName;
-
-				if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-					if (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-						continue;
-					}
-					//Recursion
-					if (!CopyDirectoryRecursive(sourcePath, destPath)) {
-						if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
-						return false;
-					}
-				} else {
-					if (!CopyFileW(sourcePath.c_str(), destPath.c_str(), false)) {
-						print_error((L"CreateAndInitializeAutoUser: Failed to copy file: " + sourcePath + L" to " + destPath).c_str());
-						if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
-						return false;
-					}
-				}
-			} while (FindNextFileW(hFind, &findData) != 0);
-
-			DWORD err = GetLastError();
-			if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
-				if (err != ERROR_NO_MORE_FILES) {
-				  SetLastError(err);
-				  return false;
-			}
-			return true;
-		}
-
-		bool FileExistsInProfile(const std::wstring& destProfilePath, const std::wstring& fileName) {
-			std::wstring fullPath = destProfilePath + L'\\' + fileName;
-			DWORD attrs = GetFileAttributesW(fullPath.c_str());
-			if (debug) {
-				std::wstringstream atrstr;
-				atrstr << L"0x" << std::hex << attrs;
-				print_debug(L"FileExistsInProfile: File ", fileName, L" attributes = ", atrstr.str());
-			}
-			return (attrs != INVALID_FILE_ATTRIBUTES); //FILE_ATTRIBUTE_DIRECTORY
-		}
-
-		bool CreateProfileTemplate(const std::wstring& destProfilePath) {
-
-			if (FileExistsInProfile(destProfilePath, L"NTUSER.DAT") && FileExistsInProfile(destProfilePath, L"NTUSER.DAT.LOG")) {
-				if (debug) print_debug(L"Files NTUSER exist in profile");
-				return true;
-			} else {
-				if (debug) print_debug(L"Files NTUSER not exist in profile ", destProfilePath);
-			}
-
-			wchar_t systemDrive[MAX_PATH] = {0};
-			DWORD len = GetEnvironmentVariableW(L"SystemDrive", systemDrive, MAX_PATH);
-			if (len == 0 || len >= MAX_PATH) {
-				wcscpy_s(systemDrive, L"C:");
-			}
-			std::wstring defaultProfile = std::wstring(systemDrive) + L"\\Users\\Default";
-
-			DWORD attr = GetFileAttributesW(defaultProfile.c_str());
-			if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-				print_error(L"CreateProfileTemplate: Default profile folder does not exist");
-				return false;
-			}
-
-			attr = GetFileAttributesW(destProfilePath.c_str());
-			if (attr == INVALID_FILE_ATTRIBUTES) {
-				if (!CreateDirectoryW(destProfilePath.c_str(), NULL)) {
-					if (GetLastError() != ERROR_ALREADY_EXISTS) {
-						print_error(L"CreateProfileTemplate: Failed to create destination directory");
-						return false;
-					}
-				}
-			}
-
-			bool defregcopyed = false;
-			std::wstring srcDat = defaultProfile + L"\\NTUSER.DAT";
-			std::wstring dstDat = destProfilePath + L"\\NTUSER.DAT";
-			std::wstring srcLog = defaultProfile + L"\\NTUSER.DAT.LOG";
-			std::wstring dstLog = destProfilePath + L"\\NTUSER.DAT.LOG";
-			if (CopyFileW(srcDat.c_str(), dstDat.c_str(), false)) {
-				if (debug) print_debug(L"Copyed default reg NTUSER.DAT from ", defaultProfile, L" to ", destProfilePath);
-				CopyFileW(srcLog.c_str(), dstLog.c_str(), false);
-				defregcopyed = true;
-			}
-
-			if (!defregcopyed) {
-				if (debug) print_debug(L"Copy default profile recursively from ", defaultProfile, L" to ", destProfilePath);
-				if (!CopyDirectoryRecursive(defaultProfile, destProfilePath)) {
-					print_error(L"CreateProfileTemplate: Failed to copy default profile recursively");
-					return false;
-				}
-			}
-
-			return true;
-		}
-
-		bool CreateProfileRegistryKey(const std::wstring& userSid, const std::wstring& profilePath) {
-
-			HKEY hKey = NULL;
-			std::wstring regPath = L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\" + userSid;
-
-			LONG res = RegCreateKeyExW(HKEY_LOCAL_MACHINE, regPath.c_str(), 0, NULL,
-									  REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL);
-			if (res != ERROR_SUCCESS) {
-				print_error(L"CreateProfileRegistryKey: Failed to create/open registry key");
-				return false;
-			}
-
-			res = RegSetValueExW(hKey, L"ProfileImagePath", 0, REG_EXPAND_SZ,
-								(const BYTE*)profilePath.c_str(),
-								(DWORD)((profilePath.length() + 1) * sizeof(wchar_t)));
-			if (res != ERROR_SUCCESS) {
-				print_error(L"CreateProfileRegistryKey: Failed to set ProfileImagePath");
-				RegCloseKey(hKey);
-				return false;
-			}
-
-			DWORD flags = 0;
-			RegSetValueExW(hKey, L"Flags", 0, REG_DWORD, (const BYTE*)&flags, sizeof(flags));
-			RegSetValueExW(hKey, L"State", 0, REG_DWORD, (const BYTE*)&flags, sizeof(flags));
-
-			RegCloseKey(hKey);
-			return true;
-
-		}
-	// PROFILE
-
-	// NOTE: Fixed username intentionally — parallel execution not supported.
-	// For concurrent runs, uncomment random suffix generation below:
-	// username = userPrefix + GenerateRandomString(6);
-	// And comment fixed
-	// username = userPrefix + userPostfix;
-
-	bool CreateAndInitializeAutoUser(std::wstring& outUsername, std::wstring& outPassword) {
-
-		std::wstring username, password, profilePath;
-		const std::wstring userPrefix = L"rah_tmp_";
-		const std::wstring userPostfix = L"user"; //temporary
-		const std::wstring profileRoot = std::wstring(_wgetenv(L"SystemRoot")) + L"\\Temp\\RAH\\";
-		WCHAR szComputerName[MAX_COMPUTERNAME_LENGTH + 1];
-		DWORD dwSize = ARRAYSIZE(szComputerName);
-		DWORD err;
-
-		//username = userPrefix + GenerateRandomString(6); //temporary disabled
-		username = userPrefix + userPostfix;
-		GenerateRandomPassword(dwSize,password);
-
-		if (debug) {
-				std::wstring first3 = password.substr(0, 3);         
-				std::wstring last3  = password.substr(password.length() - 3); 
-				if (debug) print_debug(L"Temporary user: ", username, L", password: ", first3, L"*", last3);
-				SecureClear(first3);
-				SecureClear(last3);
-		}
-
-		if (!CreateDirectoryW(profileRoot.c_str(), NULL)) {
-			err = GetLastError();
-			if (err != ERROR_ALREADY_EXISTS) {
-				//print_error((L"CreateAndInitializeAutoUser: Failed to create Temporary user profile root dir: " + profileRoot + L", error code: " + std::to_wstring(err)).c_str());
-				print_error((L"CreateAndInitializeAutoUser: Failed to create Temporary user profile root dir: " + profileRoot).c_str());
-				SecureClear(username);
-				SecureClear(password);
-				return false;
-			} else if (err == ERROR_ALREADY_EXISTS) {
-				if (debug) print_debug(L"Temporary user profile root dir already exists: ", profileRoot);
-			}
-		}
-
-		profilePath = profileRoot + username;
-		if (!CreateDirectoryW(profilePath.c_str(), NULL)) {
-			err = GetLastError();
-			if (err != ERROR_ALREADY_EXISTS) {
-				print_error((L"CreateAndInitializeAutoUser: Failed to create Temporary user profile dir: " + profilePath).c_str());
-				SecureClear(username);
-				SecureClear(password);
-				return false;
-			} else if (err == ERROR_ALREADY_EXISTS) {
-				if (debug) print_debug(L"Temporary user profile dir already exists: ", profilePath);
-			}
-		}
-		
-		if (debug) print_debug(L"Temporary user profile dir: ", profilePath);
-
-		if (!CreateLocalUser(username, password, profilePath)) {
-			print_error(L"CreateAndInitializeAutoUser: Failed to create local user");
-			SecureClear(username);
-			SecureClear(password);
-			return false;
-		}
-
-		PSID pSid = nullptr;
-		LPWSTR sidString = nullptr;
-		std::wstring userSid;
-		if (GetSIDFromUsername(username, &pSid)) {
-			if (ConvertSidToStringSidW(pSid, &sidString)) {
-				userSid = sidString;
-				LocalFree(pSid);
-				LocalFree(sidString);
-				if (debug) print_debug(L"User SID: ", userSid);
-			} else {
-				print_error(L"CreateAndInitializeAutoUser: ConvertSidToStringSid failed");
-				if (pSid) LocalFree(pSid);
-				SecureClear(username);
-				SecureClear(password);
-				return false;
-			}
-		} else {
-			print_error(L"CreateAndInitializeAutoUser: Failed to get SID for user");
-			SecureClear(username);
-			SecureClear(password);
-			return false;
-		}
-
-		if (debug) print_debug(L"Preparing profile SID: ", userSid);
-
-		if (!CreateProfileTemplate(profilePath)) {
-			print_error(L"CreateAndInitializeAutoUser: Failed to create profile template");
-			SecureClear(username);
-			SecureClear(password);
-			return false;
-		}
-
-		if (!CreateProfileRegistryKey(userSid, profilePath)) {
-			print_error(L"CreateAndInitializeAutoUser: Failed to create profile registry key");
-			SecureClear(username);
-			SecureClear(password);
-			return false;
-		}		
-	
-		outUsername			= username;
-		outPassword			= password;
-		tempUserW			= username;
-		tempUserSidW		= userSid;
-		tempUserProfileW	= profilePath;
-		tempUserCreated		= true;
-
-		SecureClear(username);
-		SecureClear(password);
-		SecureClear(profilePath);
-		//SecureClear(profileRoot); // const
-		//SecureClear(userPrefix); // const
-		//SecureClear(userPostfix); // const
-		return true;
-	}
-
-	//=================================================================================================================================================================//
-	//=================================================================================================================================================================//
-
-	bool DeleteUserAndProfileDebug(const std::wstring& usernameW, const std::wstring& userSidW, const std::wstring& profilePathW) {
-
-		bool success = true;
-
-		std::wcout << L"[TEST]: DeleteUserAndProfile\n";
-		std::wcout << L"  > Username: " << usernameW << L"\n";
-		std::wcout << L"  > SID     : " << userSidW << L"\n";
-		std::wcout << L"  > Profile : " << profilePathW << L"\n";
-
-		// User exist?
-		LPUSER_INFO_0 pInfo = nullptr;
-		if (NetUserGetInfo(NULL, usernameW.c_str(), 0, (LPBYTE*)&pInfo) == NERR_Success) {
-			std::wcout << L"  > [OK] User exists.\n";
-			NetApiBufferFree(pInfo);
-		} else {
-			std::wcerr << L"  > [WARNING] User not found.\n";
-			success = false;
-		}
-
-		// Check profile
-		DWORD attrib = GetFileAttributesW(profilePathW.c_str());
-		if (attrib != INVALID_FILE_ATTRIBUTES && (attrib & FILE_ATTRIBUTE_DIRECTORY)) {
-			std::wcout << L"  > [OK] Profile directory exists.\n";
-		} else {
-			std::wcerr << L"  > [WARNING] Profile path missing or not a directory.\n";
-			success = false;
-		}
-
-		// Check SID
-		if (userSidW.find(L"S-1-5-") == 0) {
-			std::wcout << L"  > [OK] SID appears valid.\n";
-		} else {
-			std::wcerr << L"  > [WARNING] SID may be invalid.\n";
-			success = false;
-		}
-
-		return success;
-	}
-
-	// Template DeleteUserAndProfile - Under construction
-	// exec: DeleteUserAndProfile(L"RAH_tmp_user", L"S-1-5-21-...-1001", L"C:\\Windows\\Temp\\RAH\\RAH_tmp_user");
-	// exec: DeleteUserAndProfile(username, userSID, profilePath);
-
-	std::wstring ToLower(const std::wstring& str) {
-		std::wstring lower = str;
-		std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
-		return lower;
-	}
-
-	bool StartsWith(const std::wstring& str, const std::wstring& prefix) {
-		std::wstring s1 = ToLower(str);
-		std::wstring s2 = ToLower(prefix);
-		return s1.compare(0, s2.length(), s2) == 0;
-	}
-
-	bool DeleteUserAndProfile(const std::wstring& usernameW, const std::wstring& userSidW, const std::wstring& profilePathW) {
-		bool success = true;
-
-		if (debug) {
-			DeleteUserAndProfileDebug(usernameW, userSidW, profilePathW);
-		}
-
-		if (usernameW.empty() || userSidW.empty()) {
-			print_error(L"DeleteUserAndProfile: username or SID is empty");
-			return false;
-		}
-
-		if (profilePathW.find(L"\\RAH\\") == std::wstring::npos) {
-			print_error(L"Profile path is outside of expected RAH directory, aborting delete");
-			return false;
-		}
-
-		if (!StartsWith(usernameW, L"RAH_")) {
-			std::wcerr << L"[SECURITY]: Refusing to delete unknown account: " << usernameW << L"\n";
-			return false;
-		}
-
-		// 1. Destroy environment
-		if (g_envBlock) {
-			DestroyEnvironmentBlock(g_envBlock);
-			g_envBlock = NULL;
-		}
-
-		// 2. Unload profile
-		if (g_profileLoaded) {
-			UnloadUserProfile(g_hPrimaryToken, g_profileInfo.hProfile);
-			g_profileLoaded = false;
-		}
-
-		// 3. Erase token
-		if (g_hPrimaryToken) {
-			SafeCloseHandle(g_hPrimaryToken);
-			g_hPrimaryToken = NULL;
-		}
-
-		// 4. Delete user
-		NET_API_STATUS status = NetUserDel(NULL, usernameW.c_str());
-		if (status != NERR_Success && status != NERR_UserNotFound) {
-			std::wstring msg = std::wstring(L"DeleteUserAndProfile: NetUserDel failed: ") + std::to_wstring(status);
-			print_error(msg.c_str());
-			success = false;
-		} else if (status == NERR_Success){
-			if (debug) print_debug(L"NetUserDel user: ", usernameW, L", result: Success");
-		} else if (status == NERR_UserNotFound){
-			if (debug) print_debug(L"NetUserDel user: ", usernameW, L" not found");
-		}
-
-		// 5. Delete from profilelist
-		HKEY hKey = NULL;
-		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-						  L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
-						  0, KEY_WRITE, &hKey) == ERROR_SUCCESS) {
-			LONG regDelRes = RegDeleteTreeW(hKey, userSidW.c_str());
-			if (regDelRes != ERROR_SUCCESS) {
-				std::wstring msg = std::wstring(L"DeleteUserAndProfile: RegDeleteTreeW failed for SID: ") + userSidW;
-				print_error(msg.c_str());
-				success = false;
-			} else {
-				if (debug) print_debug(L"RegDeleteTreeW for SID: ", userSidW, L", result: ", regDelRes);
-			}
-			RegCloseKey(hKey);
-		} else {
-			print_error(L"DeleteUserAndProfile: RegOpenKeyExW Failed to open ProfileList key");
-			success = false;
-		}
-
-		// 6. Delete profile directory
-		if (!profilePathW.empty()) {
-			if (!DeleteFileW((profilePathW + L"\\NTUSER.DAT").c_str())) {
-				if (debug) print_warning(L"DeleteUserAndProfile: NTUSER.DAT could not be deleted (probably in use or not found)");
-			}
-
-			SHFILEOPSTRUCTW fileOp = {0};
-			std::wstring fromPath = profilePathW + L'\0';
-			fromPath.push_back(L'\0'); // double 0-term
-
-			fileOp.wFunc = FO_DELETE;
-			fileOp.pFrom = fromPath.c_str();
-			fileOp.fFlags = FOF_NO_UI | FOF_SILENT | FOF_NOCONFIRMATION;
-
-			DWORD shfres = SHFileOperationW(&fileOp);
-			if (shfres != 0) {
-				std::wstring msg = std::wstring(L"DeleteUserAndProfile: SHFileOperationW failed to delete profile dir: ") + profilePathW + std::wstring(L", code:") + std::to_wstring(shfres);
-				print_error(msg.c_str());
-				success = false;
-			}
-			if (debug) print_debug(L"SHFileOperationW delete profile dir: ", profilePathW, L", result: ", shfres); 
-		} else {
-			if (debug) print_debug(L"Profile dir empty: ", profilePathW); 
-		}
-
-		return success;
+	LSTATUS DeleteRegistryKey(const std::wstring& RegKey) {
+		if (RegKey.empty()) return ERROR_INVALID_PARAMETER;
+		size_t pos = RegKey.find_last_of(L'\\');
+		if (pos == std::wstring::npos) return ERROR_INVALID_PARAMETER;
+		std::wstring parent = RegKey.substr(0, pos);
+		std::wstring keyName = RegKey.substr(pos + 1);
+		HKEY hParent = nullptr;
+		LSTATUS status = RegOpenKeyExW(HKEY_LOCAL_MACHINE,parent.c_str(),0,KEY_ALL_ACCESS,&hParent);
+		if (status != ERROR_SUCCESS) return status;
+		status = RegDeleteTreeW(hParent,keyName.c_str());
+		RegCloseKey(hParent);
+		if (debug) print_debug(L"DeleteRegistryKey: ", RegKey, L" - Status: ", status);
+		return status;
 	}
 
 	//=================================================================================================================================================================//
@@ -1061,8 +513,7 @@
 		SafeCloseHandle(hToken);
 
 		if (err == ERROR_NOT_ALL_ASSIGNED) {
-			std::wstring msg = std::wstring(L"EnableThreadPrivilege: The token does not have the privilege: ") + privName;
-			print_error(msg.c_str());
+			print_error(L"EnableThreadPrivilege: The token does not have the privilege: ", privName);
 			return false;
 		}
 
@@ -1089,7 +540,7 @@
 		DWORD sessionId = WTSGetActiveConsoleSessionId(); // Current console gui session id
 		if (debug) print_debug(L"Current Session ID: ", sessionId);
 
-		EnablePrivilege(SE_DEBUG_NAME); //на всякий случай
+		EnablePrivilege(SE_DEBUG_NAME); //just in case
 
 		HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 		if (hSnap == INVALID_HANDLE_VALUE) {
@@ -1149,6 +600,187 @@
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
 
+	//****************************************************************************************************//
+
+	size_t GetMinPasswordLengthPolicy() {
+		size_t len = 8;
+		USER_MODALS_INFO_0 *pBuf = NULL;
+		NET_API_STATUS nStatus = NetUserModalsGet(NULL, 0, (LPBYTE *)&pBuf);
+		if (nStatus == NERR_Success) {
+			if (pBuf != NULL) {
+				len =  static_cast<size_t>(pBuf->usrmod0_min_passwd_len);
+			}
+		}
+		if (pBuf != NULL) {
+			NetApiBufferFree(pBuf);
+		}
+		return len;
+	}
+
+	static std::mt19937& GetEngine() {
+		static thread_local std::mt19937 engine(std::random_device{}() ^ (unsigned int)time(NULL));
+		return engine;
+	}
+
+	extern "C" BOOLEAN NTAPI RtlGenRandom(PVOID RandomBuffer, ULONG RandomBufferLength);
+
+	std::wstring GenerateRandom(size_t length, const wchar_t* charset) {
+		std::wstring result;
+		result.reserve(length);
+		std::vector<BYTE> buf(length);
+		if (RtlGenRandom(buf.data(), static_cast<ULONG>(buf.size()))) {
+			for (size_t i = 0; i < length; ++i) {
+				result += charset[buf[i] & 127];
+			}
+		} else {
+			auto& engine = GetEngine();
+			for (size_t i = 0; i < length; ++i) {
+				result += charset[engine() & 127];
+			}
+		}
+		SecureZeroMemory(buf.data(), buf.size()); 
+		return result;
+	}
+
+	std::wstring GenerateUsernamePostfix(size_t length) {
+		if (length < 8) length = 8;
+		return GenerateRandom(length, CHARSET_PFX);
+	}
+
+	std::wstring GeneratePassword(size_t length) {
+		size_t pollen = GetMinPasswordLengthPolicy();
+		if (length < g_DefaultPassLen) length = g_DefaultPassLen;
+		if (length < pollen) length = pollen;
+		return GenerateRandom(length, CHARSET_PWD);
+	}
+
+	//****************************************************************************************************//
+
+	std::wstring GenerateRandomString_old(size_t length) {
+		if (debug) print_debug(L"GenerateRandomString: Generate username postfix [random]");
+		const wchar_t charset[] = L"AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789#$ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz9876543210$#";
+		//const size_t charset_size = (sizeof(charset) / sizeof(charset[0])) - 1;
+		if (length < 8) length = 8;
+		std::wstring result;
+		result.reserve(length);
+		//std::uniform_int_distribution<size_t> distribution(0, charset_size - 1);
+		auto& engine = GetEngine();
+		for (size_t i = 0; i < length; ++i) {
+			//result += charset[distribution(GetEngine())];
+			result += charset[ engine() & 127 ];
+		}
+		return result;
+	}
+
+	void GeneratePassword_old(size_t length, std::wstring& genpassword) {
+		const wchar_t charset[] = L"AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz0123456789~`!@#$%^&*()_=+-'{}[];:,.?<>\\/abcdefghijklmnopqrstuvwxyz9876543210";
+		//const size_t charset_size = (sizeof(charset) / sizeof(charset[0]) - 1);
+		size_t pollen = GetMinPasswordLengthPolicy();
+		if ( length < g_DefaultPassLen ) length = g_DefaultPassLen;
+		if ( length < pollen) length = pollen;
+		std::vector<BYTE> buf(length);
+		bool crypto_ok = RtlGenRandom(buf.data(), (ULONG)buf.size()); //[SystemFunction036]
+		crypto_ok = false;
+		genpassword.clear();
+		genpassword.reserve(length);
+		if (crypto_ok) {
+			if (debug) print_debug(L"GeneratePassword: Generate password [crypto]");
+			for (size_t i = 0; i < length; ++i) {
+				//genpassword += charset[ buf[i] % charset_size ];
+				genpassword += charset[ buf[i] & 127 ]; 
+			}
+		} else {
+			if (debug) print_debug(L"GeneratePassword: Generate password [random]");
+			//std::uniform_int_distribution<size_t> distribution(0, charset_size - 1);
+			auto& engine = GetEngine();
+			for (size_t i = 0; i < length; ++i) {
+				//genpassword += charset[distribution(GetEngine())];
+				genpassword += charset[ engine() & 127 ];
+			}
+		}
+	}
+
+	//****************************************************************************************************//
+
+	//----------------------------------------------------------------------------------------------------//
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
+	bool IsUserLoggedOn(const std::wstring& username) {
+		bool found = false;
+		PWTS_PROCESS_INFO pProcInfo = nullptr;
+		DWORD procCount = 0;
+
+		// Get procs list
+		if (!WTSEnumerateProcessesW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &pProcInfo, &procCount)) {
+			return found; // Unable to get process list - assuming user is inactive
+		}
+
+		for (DWORD i = 0; i < procCount; ++i) {
+			DWORD sessionId = pProcInfo[i].SessionId;
+			LPWSTR procUser = nullptr;
+			DWORD userLen = 0;
+
+			// Get user from proc
+			if (WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, sessionId, WTSUserName, &procUser, &userLen)) {
+				if (_wcsicmp(procUser, username.c_str()) == 0) {
+					found = true; // Found proc
+				}
+				WTSFreeMemory(procUser);
+			}
+
+			if (found) break; // Proc found - terminating
+		}
+
+		WTSFreeMemory(pProcInfo);
+		return found;
+	}
+
+	std::wstring SidToString(PSID pSid) {
+		if (!pSid) return L"";
+		LPWSTR szSid = nullptr;
+		std::wstring result = L"";
+		if (ConvertSidToStringSidW(pSid, &szSid)) {
+			result = szSid;
+			LocalFree(szSid);
+		}
+		return result;
+	}
+ 
+	bool GetSIDFromUsername(PSID* ppSid, const std::wstring& username, const std::wstring domain = L"") {
+		if (!ppSid) return false;
+		*ppSid = nullptr;
+		LPCWSTR lpSystemName = domain.empty() ? NULL : domain.c_str();
+
+		BYTE sidBuffer[SECURITY_MAX_SID_SIZE];
+		DWORD sidSize = sizeof(sidBuffer);
+		WCHAR domainBuffer[MAX_PATH];
+		DWORD domainSize = MAX_PATH;
+		SID_NAME_USE snu;
+
+		if (LookupAccountNameW(lpSystemName, username.c_str(), (PSID)sidBuffer, &sidSize, domainBuffer, &domainSize, &snu)) {
+			if (IsValidSid((PSID)sidBuffer)) {
+				*ppSid = (PSID)LocalAlloc(LPTR, sidSize);
+				if (*ppSid) {
+					CopyMemory(*ppSid, sidBuffer, sidSize);
+					if (debug) {
+						std::wstring sidString = SidToString(*ppSid);
+						print_debug(L"GetSIDFromUsername: LookupAccountNameW: Retrieved User SID: ", sidString);
+					}
+					return true;
+				}
+			} else {
+				print_error(L"GetSIDFromUsername: LookupAccountNameW: Invalid SID");
+			}
+		}
+		print_error(L"GetSIDFromUsername: LookupAccountNameW: failed to get SID for: ", username);
+		return false;
+	}
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
 	void PrintTokenInformation(HANDLE sToken) {
 
 		if (!sToken || sToken == INVALID_HANDLE_VALUE) {
@@ -1159,9 +791,7 @@
 		if (debug) print_debug(L"PrintTokenInformation, token: ", sToken);
 
 		DWORD dwSize = 0;
-		if (!GetTokenInformation(sToken, TokenUser, nullptr, 0, &dwSize) &&
-			GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-		{
+		if (!GetTokenInformation(sToken, TokenUser, nullptr, 0, &dwSize) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
 			print_error(L"PrintTokenInformation: GetTokenInformation [TokenUser] size failed");
 			return;
 		}
@@ -1281,8 +911,1220 @@
 				print_error(L"PrintTokenPrivileges: LookupPrivilegeNameW failed");
 			}
 		}
-
 		delete[] privs;
+	}
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
+	std::wstring ToLower(const std::wstring& str) {
+		std::wstring lower = str;
+		std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+		return lower;
+	}
+
+	bool StartsWith(const std::wstring& str, const std::wstring& prefix) {
+		std::wstring s1 = ToLower(str);
+		std::wstring s2 = ToLower(prefix);
+		return s1.compare(0, s2.length(), s2) == 0;
+	}
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
+	std::wstring GetProfilePathBySid(const std::wstring& userSidW, HKEY hUserKey = NULL) {
+		std::wstring subKey = g_profileRegKey + L"\\" + userSidW;
+		std::wstring profilePathW = L"";
+		bool isOpened = false;
+		LSTATUS status;
+		if (hUserKey == NULL) {
+			status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, subKey.c_str(), 0, KEY_READ, &hUserKey);
+			if (status == ERROR_SUCCESS) isOpened = true;
+		} else {
+			status = ERROR_SUCCESS;
+		}
+		if (status == ERROR_SUCCESS) {
+			wchar_t profilePath[MAX_PATH] = {0};
+			DWORD pathSize = sizeof(profilePath);
+			if (RegQueryValueExW(hUserKey, L"ProfileImagePath", nullptr, nullptr,reinterpret_cast<BYTE*>(profilePath), &pathSize) == ERROR_SUCCESS) {
+				wchar_t expandedPath[MAX_PATH];
+				if (ExpandEnvironmentStringsW(profilePath, expandedPath, MAX_PATH) > 0) {
+					profilePathW = expandedPath;
+				} else {
+					profilePathW = profilePath;
+				}
+			}
+			if (isOpened) RegCloseKey(hUserKey);
+		}
+		return profilePathW;
+	}
+
+	bool IsRahTemporaryUserSid(const std::wstring& userSidW, HKEY hUserKey = NULL) {
+		bool success = false;
+		bool isOpened = false;
+		LSTATUS status;
+		if (hUserKey == NULL) {
+			std::wstring subKey = g_profileRegKey + L"\\" + userSidW;
+			status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, subKey.c_str(), 0, KEY_READ, &hUserKey);
+			if (status == ERROR_SUCCESS) isOpened = true;
+		} else {
+			status = ERROR_SUCCESS;
+		}
+		if (status == ERROR_SUCCESS) {
+			success	= (RegQueryValueExW(hUserKey,L"IsRahTemporaryUser",nullptr,nullptr,nullptr,nullptr) == ERROR_SUCCESS);
+			if (isOpened) RegCloseKey(hUserKey);
+		}
+		return success;
+	}
+
+	bool IsRahTemporaryKeepedUserSid(const std::wstring& userSidW, HKEY hUserKey = NULL) {
+		bool success = false;
+		bool isOpened = false;
+		LSTATUS status;
+		if (hUserKey == NULL) {
+			std::wstring subKey = g_profileRegKey + L"\\" + userSidW;
+			status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, subKey.c_str(), 0, KEY_READ, &hUserKey);
+			if (status == ERROR_SUCCESS) isOpened = true;
+		} else {
+			status = ERROR_SUCCESS;
+		}
+		if (status == ERROR_SUCCESS) {
+			success	= (RegQueryValueExW(hUserKey,L"IsKeepedUser",nullptr,nullptr,nullptr,nullptr) == ERROR_SUCCESS);
+			if (isOpened) RegCloseKey(hUserKey);
+		}
+		return success;
+	}
+
+	bool IsRahTemporaryUser(const std::wstring& username) {
+		bool success = false;
+		if (!username.empty()) {
+			LPUSER_INFO_1 tmpInfo = NULL;
+			NET_API_STATUS nStatus = NetUserGetInfo(NULL, username.c_str(), 1, (LPBYTE*)&tmpInfo);
+			if (nStatus == NERR_Success) {
+				if (tmpInfo != NULL) {
+					if (tmpInfo->usri1_comment && std::wstring(tmpInfo->usri1_comment) == g_RahUserComment) {
+						success = true; 
+					}
+				}
+				if (!success) {
+					PSID tSid = nullptr;		
+					LPWSTR tSidString = nullptr;
+					std::wstring tUserSid;
+					bool tDebug = debug;
+					debug = false;
+					if (GetSIDFromUsername(&tSid,username)) {
+						debug = tDebug;
+						if (IsValidSid(tSid)) {
+							if (ConvertSidToStringSidW(tSid, &tSidString)) {
+								tUserSid = tSidString;
+								LocalFree(tSidString);
+							}
+						}
+						LocalFree(tSid);
+					}
+					if (!tUserSid.empty()) {
+						success = IsRahTemporaryUserSid(tUserSid);
+					}
+					debug = tDebug;
+				}
+				NetApiBufferFree(tmpInfo);
+				tmpInfo = NULL;
+			} else {
+				if (nStatus != NERR_UserNotFound) {
+					return false; //For future use
+				}
+			}
+		}
+		return success;
+	}
+	
+	void FindTemporaryUsers() { //As an example
+		LPUSER_INFO_1 pBuf = NULL;
+		DWORD entriesRead = 0;
+		DWORD totalEntries = 0;
+		DWORD resumeHandle = 0;
+		NET_API_STATUS nStatus;
+		do {
+			nStatus = NetUserEnum(NULL,1,FILTER_NORMAL_ACCOUNT,(LPBYTE*)&pBuf,MAX_PREFERRED_LENGTH,&entriesRead,&totalEntries,&resumeHandle);
+			if ((nStatus == NERR_Success) || (nStatus == ERROR_MORE_DATA)) {
+				if (pBuf != NULL) {
+					for (DWORD i = 0; i < entriesRead; i++) {
+						// Check Comment
+						if (pBuf[i].usri1_comment && pBuf[i].usri1_comment == g_RahUserComment) {
+							if (debug) print_debug(L"FindTemporaryUsers: Found matching user: ", pBuf[i].usri1_name);
+						}
+					}
+				}
+			}
+
+			if (pBuf != NULL) {
+				NetApiBufferFree(pBuf);
+				pBuf = NULL;
+			}
+		} 
+		while (nStatus == ERROR_MORE_DATA);
+	}
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
+	bool TempUserAndProfileDebug(const std::wstring& usernameW, const std::wstring& userSidW, const std::wstring& profilePathW, const std::wstring& profileKeyW = L"" ) {
+
+		bool success = true;
+
+		std::wcout << L"[DEBUG]: User and profile:\n";
+		std::wcout << L"  > Username: " << usernameW << L"\n";
+		std::wcout << L"  > SID     : " << userSidW << L"\n";
+		std::wcout << L"  > Profile : " << profilePathW << L"\n";
+
+		// User exist?
+		LPUSER_INFO_0 pInfo = nullptr;
+		if (NetUserGetInfo(NULL, usernameW.c_str(), 0, (LPBYTE*)&pInfo) == NERR_Success) {
+			std::wcout << L"  > [OK] User exists.\n";
+			NetApiBufferFree(pInfo);
+		} else {
+			std::wcout << L"  > [WARNING] User not found.\n";
+			success = false;
+		}
+
+		// Check profile
+		
+		if (IsDirectoryExists(profilePathW)) {
+			std::wcout << L"  > [OK] Profile directory exists.\n";
+		} else {
+			std::wcout << L"  > [WARNING] Profile path missing or not a directory.\n";
+			success = false;
+		}
+
+		// Check SID
+		if (userSidW.find(L"S-1-5-") == 0) {
+			std::wcout << L"  > [OK] SID appears valid.\n";
+		} else {
+			std::wcout << L"  > [WARNING] SID may be invalid.\n";
+			success = false;
+		}
+
+		// Check Profile rgistry key
+		if (!profileKeyW.empty()) {
+			std::wcout << L"  > [OK] Profile key: " << profileKeyW << "\n";
+		}
+
+		return success;
+	}
+
+	int g_R_UC = 0;
+	LSTATUS RunRegUnload(const std::wstring& path) {
+		if (path.empty()) return 0;
+		DWORD exitCode = 0;
+		std::wstring regLogName, regcommand;
+		if (debug) {
+			g_R_UC+=1;
+			regLogName = L"reg_log_" + std::to_wstring(g_R_UC) + L".log";
+			regcommand = L"cmd.exe /d /c \"chcp 437 >nul & ( reg.exe query \"HKEY_USERS\\" + path + L"\" >nul 2>&1 || (exit /b 0) ) && (reg.exe unload \"HKEY_USERS\\" + path + L"\" >\"%temp%\\" + regLogName + L"\" 2>&1)\"";
+		} else {
+			regcommand = L"cmd.exe /d /c \"chcp 437 >nul & ( reg.exe query \"HKEY_USERS\\" + path + L"\" >nul 2>&1 || (exit /b 0) ) && (reg.exe unload \"HKEY_USERS\\" + path + L"\" >nul 2>&1)\"";
+		}
+		STARTUPINFOW si = { sizeof(si) };
+		PROCESS_INFORMATION pi = { 0 };
+		if (CreateProcessW(NULL, &regcommand[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+			WaitForSingleObject(pi.hProcess, 5000);
+			GetExitCodeProcess(pi.hProcess, &exitCode);
+			if (debug) print_debug(L"UnloadUserRegistry: Failover: reg unload ", path, L", ExitCode: ", exitCode);
+			CloseHandle(pi.hProcess);
+			CloseHandle(pi.hThread);
+		} else {
+			if (debug) print_error(L"UnloadUserRegistry: Failover: reg unload - fatal error");
+			exitCode = 9009;
+		}
+		return exitCode;
+	}
+
+	void UnloadUserRegistry(const std::wstring& userSid) {
+		if (userSid.empty()) return;
+		EnablePrivilege(SE_RESTORE_NAME);
+		EnablePrivilege(SE_BACKUP_NAME);
+		LSTATUS res = 0;
+		res = RegUnLoadKeyW(HKEY_USERS, userSid.c_str());
+		if (res == ERROR_SUCCESS || res == ERROR_FILE_NOT_FOUND) {
+			if (debug) print_debug(L"UnloadUserRegistry: RegUnLoadKeyW: HKEY_USERS\\", userSid);
+		} else {
+			//failover to reg unload
+			if (debug) print_debug(L"UnloadUserRegistry: RegUnLoadKeyW: Result: ", res);
+			res = RunRegUnload(userSid);
+		}
+		if (debug) print_debug(L"UnloadUserRegistry: HKEY_USERS\\", userSid, L", Result: ", res);
+		res = RegUnLoadKeyW(HKEY_USERS, (userSid + L"_Classes").c_str());
+		if (res == ERROR_SUCCESS || res == ERROR_FILE_NOT_FOUND) {
+			if (debug) print_debug(L"UnloadUserRegistry: RegUnLoadKeyW: HKEY_USERS\\", userSid);
+		} else {
+			//failover to reg unload
+			if (debug) print_debug(L"UnloadUserRegistry: RegUnLoadKeyW: Result: ", res);
+			res = RunRegUnload(userSid + L"_Classes");
+		}
+		if (debug) print_debug(L"UnloadUserRegistry: HKEY_USERS\\", userSid + L"_Classes", L", Result: ", res);
+	}
+
+	bool RemoveFromHiddenUserList(const std::wstring& username)	{
+		if (username.empty()) return true;
+		HKEY hKey = nullptr;
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, g_userListKey.c_str(), 0, KEY_SET_VALUE, &hKey) != ERROR_SUCCESS) {
+			return true;
+		}
+		LSTATUS res = RegDeleteValueW(hKey, username.c_str());
+		if (res != ERROR_SUCCESS && res != ERROR_FILE_NOT_FOUND) {
+			print_error(L"Failed to remove temporary user from UserList");
+			RegCloseKey(hKey);
+			return false;
+		}
+		RegCloseKey(hKey);
+		return true;
+	}
+
+	void UnloadTempUserProfile(const std::wstring& usernameW, const std::wstring& userSidW) {
+		
+		// 1. Destroy environment
+		if (g_envBlock) {
+			if (debug) print_debug(L"UnloadTempUserProfile: DestroyEnvironmentBlock: Temporary user: ", usernameW);
+			DestroyEnvironmentBlock(g_envBlock);
+			g_envBlock = NULL;
+		}
+
+		// 2. Unload profile
+		if (g_hPrimaryToken) {
+			if (UnloadUserProfile(g_hPrimaryToken, g_profileInfo.hProfile)) {
+				if (debug) print_debug(L"UnloadTempUserProfile: UnloadUserProfile: Temporary user: ", usernameW, L" - Success");
+			} else {
+				if (debug) print_error(L"UnloadTempUserProfile: UnloadUserProfile: Temporary user: ", usernameW);
+			}
+			g_profileLoaded = false;
+		}
+
+		// 3. Erase token
+		if (g_hPrimaryToken) {
+			if (debug) print_debug(L"UnloadTempUserProfile: SafeCloseHandle: Temporary user: ", usernameW);
+			SafeCloseHandle(g_hPrimaryToken);
+			g_hPrimaryToken = NULL;
+		}
+
+		// 4. Reg
+		UnloadUserRegistry(userSidW);
+	}
+	
+	bool DeleteTempUserProfile(const std::wstring& userSidW, const std::wstring& profilePathW) {
+		bool success = false;
+		if (!userSidW.empty()) {
+			if (DeleteProfileW(userSidW.c_str(), NULL, NULL)) {
+				success = true;
+			}
+		}
+		if (!profilePathW.empty()) {
+			if (IsDirectoryExists(profilePathW)) {
+				if (!DeleteFileW((profilePathW + L"\\NTUSER.DAT").c_str())) {
+					if (debug) print_warning(L"DeleteTempUserProfile: NTUSER.DAT could not be deleted (probably in use or not found)");
+				}
+				SHFILEOPSTRUCTW fileOp = {0};
+				std::wstring fromPath = profilePathW + L'\0';
+				fromPath.push_back(L'\0'); // double 0-term
+					fileOp.wFunc = FO_DELETE;
+				fileOp.pFrom = fromPath.c_str();
+				fileOp.fFlags = FOF_NO_UI | FOF_SILENT | FOF_NOCONFIRMATION;
+					DWORD shfres = SHFileOperationW(&fileOp);
+				if (shfres != 0) {
+					print_error(L"DeleteTempUserProfile: SHFileOperationW: failed to delete profile dir: ", profilePathW, L", code:", shfres);
+				} else {
+					if (debug) print_debug(L"DeleteTempUserProfile: SHFileOperationW: delete profile dir: ", profilePathW, L", result: ", shfres); 
+					success = true;
+				}
+			} else {
+				success = true;
+			}
+		}
+		return success;
+	}
+
+	bool DeleteTempUserRegProfileKey(const std::wstring& userSidW) {
+		bool success = false;
+		LSTATUS res = 0;
+		if (userSidW.empty()) return false;
+		HKEY hKey = NULL;
+		std::wstring fullKey = g_profileRegKey + L"\\" + userSidW;
+		std::wstring fullKeyBak = fullKey + L".bak" ;
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,fullKeyBak.c_str(),0,KEY_ALL_ACCESS,&hKey) == ERROR_SUCCESS) {
+			RegCloseKey(hKey);
+			if (debug) print_debug(L"DeleteTempUserRegProfileKey: RegDeleteTreeW: for: ", userSidW, L".bak");
+			res = DeleteRegistryKey(fullKeyBak);
+			if (res == ERROR_SUCCESS || res == ERROR_FILE_NOT_FOUND) {
+				if (debug) print_debug(L"DeleteTempUserRegProfileKey: RegDeleteTreeW: for: ", userSidW, L".bak, Result: ", res);
+				success = true;
+			} else {
+				print_error(L"DeleteTempUserRegProfileKey: RegDeleteTreeW: failed for: ", userSidW, L".bak, Result: ", res);
+			}
+		} else {
+			success = true;
+		}
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,fullKey.c_str(),0,KEY_ALL_ACCESS,&hKey) == ERROR_SUCCESS) {
+			RegCloseKey(hKey);
+			if (debug) print_debug(L"DeleteTempUserRegProfileKey: RegDeleteTreeW: for: ", userSidW);
+			res = DeleteRegistryKey(fullKey);
+			if (res == ERROR_SUCCESS || res == ERROR_FILE_NOT_FOUND) {
+				if (debug) print_debug(L"DeleteTempUserRegProfileKey: RegDeleteTreeW: for: ", userSidW, L", Result: ", res);
+				success = true;
+			} else {
+				print_error(L"DeleteTempUserRegProfileKey: RegDeleteTreeW: failed for: ", userSidW, L", Result: ", res);
+			}
+		} else {
+			success = true;
+		}
+		return success;
+	}
+
+	bool DeleteTempUser(const std::wstring& usernameW) {
+		bool success = false;
+		NET_API_STATUS status = NetUserDel(NULL, usernameW.c_str());
+		if (status != NERR_Success && status != NERR_UserNotFound) {
+			std::wstring msg = std::wstring(L"DeleteTempUserAndProfile: NetUserDel failed: ") + std::to_wstring(status);
+			print_error(L"DeleteTempUserAndProfile: NetUserDel failed: ", status);
+			success = false;
+		} else if (status == NERR_Success){
+			success = true;
+			if (debug) print_debug(L"DeleteTempUserAndProfile: NetUserDel user: ", usernameW, L", result: Success");
+		} else if (status == NERR_UserNotFound){
+			success = true;
+			if (debug) print_debug(L"DeleteTempUserAndProfile: NetUserDel user: ", usernameW, L" not found");
+		}
+		return success;
+	}
+
+	bool DeleteTempUserAndProfile(const std::wstring& usernameW, const std::wstring& userSidW, const std::wstring& profilePathW, bool checkingUser = true, bool checkingProfile = true, bool checkSid = true) {
+		bool success = true;
+		int deleteUserFlag = 0;
+
+		if (debug) {
+			TempUserAndProfileDebug(usernameW, userSidW, profilePathW);
+		}
+
+		if (usernameW.empty()) {
+			print_error(L"DeleteTempUserAndProfile: username is empty");
+			return false;
+		}
+
+		if (checkSid) {
+			if (userSidW.empty()) {
+				print_error(L"DeleteTempUserAndProfile: SID is empty");
+				return false;
+			}
+		}
+
+		if (checkingProfile) {
+			if (profilePathW.find(g_RahRootDirName) == std::wstring::npos) {
+				print_error(L"DeleteTempUserAndProfile: Profile path is outside of expected RAH directory, aborting delete");
+				return false;
+			}
+		}
+
+		if (checkingUser) {
+			if ( tempUserNameW.empty() ) {
+				if (!StartsWith(usernameW, L"rah_")) {
+					deleteUserFlag = 1;
+				}
+			} else {
+				if ( usernameW != tempUserNameW ) {
+					deleteUserFlag = 2;
+				}
+			}
+		}
+
+		if ( deleteUserFlag != 0 ) {
+			std::wcout << L"[SECURITY]: DeleteTempUserAndProfile: Refusing to delete unknown account: " << usernameW << L" [" << deleteUserFlag << L"]\n";
+			return false;
+		}
+
+		UnloadTempUserProfile(usernameW,userSidW);
+
+		Sleep(1000);
+		DeleteTempUserProfile(userSidW,profilePathW);
+		
+		DeleteTempUserRegProfileKey(userSidW);
+
+		DeleteTempUser(usernameW);
+		
+		RemoveFromHiddenUserList(usernameW);
+
+		return success;
+	}
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
+	void CheckAndCleanupOrphanedTempUsers()	{
+
+		bool tDebug = debug;
+		HKEY hProfiles = nullptr;
+		
+		if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Begin.");
+
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,g_profileRegKey.c_str(),0,KEY_READ,&hProfiles) != ERROR_SUCCESS) {
+			if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: Failed to open ProfileList key.");
+			return;
+		}
+
+		if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: ProfileList key opened.");
+
+		std::wstring hostname = GetHostname();
+
+		DWORD subKeyIndex = 0;
+		DWORD tempUserKeyIndex = 0;
+		wchar_t subKeyName[256];
+		DWORD subKeyNameSize = _countof(subKeyName);
+		bool mTmpUsersFound = false;
+		bool doIncrement = false;
+
+		while (RegEnumKeyExW(hProfiles,subKeyIndex,subKeyName,&subKeyNameSize,nullptr,nullptr,nullptr,nullptr) == ERROR_SUCCESS) {
+
+			doIncrement = true;
+			subKeyNameSize = 256; //Reset
+			HKEY hUserKey = nullptr;
+
+			if (RegOpenKeyExW(hProfiles,subKeyName,0,KEY_READ,&hUserKey) == ERROR_SUCCESS) {
+
+				bool isTemp = (RegQueryValueExW(hUserKey,L"IsRahTemporaryUser",nullptr,nullptr,nullptr,nullptr) == ERROR_SUCCESS);
+				bool isKeeped =	(RegQueryValueExW(hUserKey,L"IsKeepedUser", nullptr,nullptr,nullptr,nullptr) == ERROR_SUCCESS);
+
+				if (isTemp) {
+
+					bool doDeleteOrphanedKey = false;
+					if (!mTmpUsersFound) mTmpUsersFound = true;
+					tempUserKeyIndex++;
+
+					///// Temp user profile
+
+						if (debug) {
+							print_debug(L"CheckAndCleanupOrphanedTempUsers: Checking key: #",tempUserKeyIndex,L", Subkey: #",subKeyIndex);
+							print_debug(L"CheckAndCleanupOrphanedTempUsers: Reg.Path: ",g_profileRegKey,L"\\",subKeyName);
+						}
+
+						std::wstring profilePathW;
+						if (hUserKey) {
+							profilePathW = GetProfilePathBySid(subKeyName, hUserKey);
+						}
+						if (profilePathW.empty()) {
+							if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: GetProfilePathBySid: Get ProfileImagePath from registry failed");
+						}
+
+						bool isSidAssigned = false;
+						DWORD sidSize = 0;
+						PSID pSid  = nullptr;
+						LPWSTR sidString = nullptr;
+
+						std::wstring sidW;
+						std::wstring usernameW;
+						std::wstring domainW;
+						wchar_t username[256] = { 0 };
+						DWORD usernameSize = _countof(username);
+						wchar_t domainName[256] = { 0 };
+						DWORD domainNameSize = _countof(domainName);
+						SID_NAME_USE sidType;
+
+						if (RegQueryValueExW(hUserKey, L"Sid", nullptr, nullptr, nullptr, &sidSize) == ERROR_SUCCESS && sidSize > 0) {
+
+							std::vector<BYTE> sidBuffer(sidSize);
+							if (RegQueryValueExW(hUserKey, L"Sid", nullptr, nullptr, sidBuffer.data(), &sidSize) == ERROR_SUCCESS) {
+								PSID tempSid = reinterpret_cast<PSID>(sidBuffer.data());
+								DWORD sidLen = GetLengthSid(tempSid);
+								pSid = (PSID)LocalAlloc(LPTR, sidLen);
+								if (pSid) {
+									if (CopySid(sidLen, pSid, tempSid)) {
+										if (IsValidSid(pSid)) {
+											isSidAssigned = true;
+										}
+									}
+								}
+								if (isSidAssigned) {
+									if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: The SID from the reg key param 'sid' is assigned.");
+								} else {
+									if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: The SID from the reg key param 'sid' is assign failed");
+								}
+							} else {
+								if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: Failed to read reg key param 'sid'");
+							}
+						}
+
+						if (!isSidAssigned) {
+							std::wstring tmpKey = subKeyName;
+							if (tmpKey.size() > 4 && tmpKey.compare(tmpKey.size() - 4, 4, L".bak") == 0) {
+								tmpKey.resize(tmpKey.size() - 4);
+							}
+							if (ConvertStringSidToSidW(tmpKey.c_str(), &pSid)) {
+								if (IsValidSid(pSid)) {
+									isSidAssigned = true;
+									if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: The SID is assigned from the reg key: ", subKeyName );
+								} else {
+									sidW = tmpKey;
+									if (LookupAccountSidW(nullptr, pSid, username, &usernameSize, domainName, &domainNameSize, &sidType)) {
+										usernameW = username;
+										domainW = domainName;
+									}
+									if (debug) print_warning(L"CheckAndCleanupOrphanedTempUsers: The SID is assigned from the reg key: ", subKeyName );
+								}
+							}
+						}
+
+						if (isSidAssigned) {
+
+							if (ConvertSidToStringSidW(pSid, &sidString)) {
+								sidW = sidString;
+								if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Found SID: '", sidW, L"'");
+							}
+
+							if (!sidW.empty()) {
+
+								if (isKeeped) {
+									if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Temporary keeped local user profile key found.");
+								} else {
+									if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Temporary non keeped local user profile key found.");
+								}
+
+								if (LookupAccountSidW(nullptr, pSid, username, &usernameSize, domainName, &domainNameSize, &sidType)) {
+
+									usernameW = username;
+									domainW = domainName;
+
+									if (!usernameW.empty()) {
+										if (hostname == domainW) {
+
+											if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: LookupAccountSidW: Found local temorary user: '", usernameW, L"'");
+
+											PSID tSid = nullptr;
+											LPWSTR tSidString = nullptr;
+											std::wstring tUserSid;
+
+											debug = false;
+											if (GetSIDFromUsername(&tSid,usernameW)) {
+												debug = tDebug;
+															
+												if (IsValidSid(tSid)) {
+													if (ConvertSidToStringSidW(tSid, &tSidString)) {
+														tUserSid = tSidString;
+													}
+												}
+												LocalFree(tSid);
+												LocalFree(tSidString);
+
+												if (debug) {
+													print_debug(L"CheckAndCleanupOrphanedTempUsers: User debug:");
+													TempUserAndProfileDebug(usernameW, sidW, profilePathW, subKeyName);
+													print_debug(L"CheckAndCleanupOrphanedTempUsers: User debug end");
+												}
+
+												if (tUserSid == sidW) {
+													if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Call.GetSIDFromUsername: User SID correct.");
+													if (!profilePathW.empty()) {
+														if (IsDirectoryExists(profilePathW)) {
+															if (profilePathW.find(g_RahRootDirName) == std::wstring::npos) {
+																print_warning(L"CheckAndCleanupOrphanedTempUsers: Profile Path is not in RAH: ", profilePathW);
+															} else {
+																if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Profile Path correct: ", profilePathW);
+															}
+														} else {
+															print_warning(L"CheckAndCleanupOrphanedTempUsers: Profile Path is not exists: ", profilePathW);
+														}
+													} else {
+														print_warning(L"CheckAndCleanupOrphanedTempUsers: Profile Path is not specified:");
+													}
+
+													if (g_cleanupall_mode) isKeeped = false;
+													if (!isKeeped) {
+														if (!IsUserLoggedOn(username)) {
+															if (debug) {
+																print_debug(L"CheckAndCleanupOrphanedTempUsers: Deleting local temorary user: ");
+																print_debug(L"CheckAndCleanupOrphanedTempUsers: User name: ", usernameW);
+																print_debug(L"CheckAndCleanupOrphanedTempUsers: User sid: ", sidW);
+																if (!profilePathW.empty()) {
+																	print_debug(L"CheckAndCleanupOrphanedTempUsers: Profile Path: ", profilePathW);
+																} else {
+																	print_warning(L"CheckAndCleanupOrphanedTempUsers: Profile Path is not specified:");
+																}
+															}
+															if (DeleteTempUserAndProfile(usernameW, sidW, profilePathW, false)) { //false = do not check username
+																if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Deleting local temorary user: Success");
+																doIncrement = false; // no subKeyIndex++;
+															} else {
+																print_error(L"CheckAndCleanupOrphanedTempUsers: Deleting local temorary user Error");
+															}
+														} else {
+															print_warning(L"CheckAndCleanupOrphanedTempUsers: Refused to delete logged in local temporary user: ", usernameW);
+														}
+													}
+													if (!g_cleanupall_mode) {
+														if (isKeeped) {
+															if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Skip Deleting keeped local temorary user: ", usernameW);
+														}
+													}
+												} else {
+													if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: Call.GetSIDFromUsername: User SID incorrect.");
+													doDeleteOrphanedKey = true;
+												}
+											} else {
+												if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: Call.GetSIDFromUsername: failed.");
+												doDeleteOrphanedKey = true;
+											}
+											debug = tDebug;
+										} else {
+											if (debug) print_warning(L"CheckAndCleanupOrphanedTempUsers: LookupAccountSidW: Found non local temorary user: '", usernameW, L"', Skip.");
+										}
+									} else {
+										if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: LookupAccountSidW: Get UserName by SID failed.");
+										doDeleteOrphanedKey = true;
+									}
+								} else {
+									DWORD err = GetLastError();
+									if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: LookupAccountSidW: failed, error: ", err);
+									doDeleteOrphanedKey = true;
+								}
+							} else {
+								DWORD err = GetLastError();
+								if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: Convert SID: failed, error: ", err);
+								doDeleteOrphanedKey = true;
+							}
+
+						} else {
+							if (debug) print_error(L"CheckAndCleanupOrphanedTempUsers: RegQueryValueExW: Get SID from registry failed.");
+							doDeleteOrphanedKey = true;
+						}
+
+						if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Checking key: #",tempUserKeyIndex,L", Subkey: #",subKeyIndex,L" end.");
+
+						if (doDeleteOrphanedKey) {
+							TempUserAndProfileDebug(usernameW, sidW, profilePathW, subKeyName);
+							if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Cleanup orphaned user profile");
+							if (hUserKey != nullptr) {
+								RegCloseKey(hUserKey);
+								hUserKey = nullptr;
+							}
+							//Here Delete orphaned profile if exists
+								if (!sidW.empty() || !profilePathW.empty()) {
+									if (DeleteTempUserProfile(sidW,profilePathW)) {
+										if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: DeleteTempUserProfile: Success.");
+									}
+								}
+							//Here Delete orphaned profile key - SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\<SID> / <SID>.bak
+								std::wstring fullKey = g_profileRegKey + L"\\" + subKeyName;
+								LSTATUS res = DeleteRegistryKey(fullKey); //IsRahTemporaryUser
+								if (res == ERROR_SUCCESS || res == ERROR_FILE_NOT_FOUND) {
+									if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Cleanup orphaned user profile key: Success: ", res, ", Key: ", fullKey);
+									doIncrement = false;
+								} else {
+									if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Cleanup orphaned user profile key: Result: ", res, ", Key: ", fullKey);
+								}
+								if (!usernameW.empty()) {
+									DeleteTempUser(usernameW);
+									RemoveFromHiddenUserList(usernameW);
+								}
+							if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Cleanup orphaned user profile end");
+						}
+
+					///// Temp user profile
+
+					LocalFree(pSid);
+					pSid = nullptr;
+					LocalFree(sidString);
+
+				}
+
+				if (hUserKey != nullptr) {
+					RegCloseKey(hUserKey);
+					hUserKey = nullptr;
+				}
+		
+			}
+			if (doIncrement) subKeyIndex++;
+		}
+
+		RegCloseKey(hProfiles);
+
+		if (!mTmpUsersFound) {
+			if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: No any keys with profiles of local temporary users were found.");
+		}
+		if (debug) print_debug(L"CheckAndCleanupOrphanedTempUsers: Finish.");
+
+	}
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
+	bool AddUserToAdminsLocalGroup(const std::wstring& username) {
+		bool success = false;
+		const wchar_t* adminGroupSidStr = L"S-1-5-32-544";
+		PSID pAdminGroupSid = nullptr;
+		if (!ConvertStringSidToSidW(adminGroupSidStr, &pAdminGroupSid)) {
+			print_error(L"AddUserToAdminsLocalGroup: Failed to convert SID string: ", adminGroupSidStr);
+			return false;
+		}
+		WCHAR groupName[256] = { 0 }, domainName[256] = { 0 };
+		DWORD groupNameSize = ARRAYSIZE(groupName);
+		DWORD domainNameSize = ARRAYSIZE(domainName);
+		SID_NAME_USE sidUse;
+		if (!LookupAccountSidW(nullptr, pAdminGroupSid, groupName, &groupNameSize, domainName, &domainNameSize, &sidUse)) {
+			print_error(L"AddUserToAdminsLocalGroup: LookupAccountSidW: Administrators group failed");
+		} else {
+			if (pAdminGroupSid) {
+				std::wstring fullGroupName = groupName;
+				LOCALGROUP_MEMBERS_INFO_3 memberInfo;
+				memberInfo.lgrmi3_domainandname = const_cast<LPWSTR>(username.c_str());
+				NET_API_STATUS status = NetLocalGroupAddMembers(nullptr,fullGroupName.c_str(),3,(LPBYTE)&memberInfo,1);
+				std::wstring statusText = std::to_wstring(status);
+				if (debug) print_debug(L"NetLocalGroupAddMembers: Status ", statusText);
+				if (status == NERR_Success) {
+					if (debug) print_debug(L"Successfully added user ", username, L" to local administrators group");
+					success = true;
+				} else if ( status == ERROR_MEMBER_IN_ALIAS ) {
+					if (debug) print_debug(L"User ", username, L" already in local administrators group");
+					success = true;
+				} else {
+					print_error(L"AddUserToAdminsLocalGroup: NetLocalGroupAddMembers failed to add user ", username, L" to local administrators group");
+				}
+			}
+		}
+		LocalFree(pAdminGroupSid);
+		return success;
+	}
+
+	bool CreateLocalUser(const std::wstring& username, const std::wstring& password, const std::wstring& profileDir ) {
+		bool userSuccess = false;
+		NET_API_STATUS nStatus;
+		LPBYTE pBuf = NULL;
+		nStatus = NetUserGetInfo(NULL, username.c_str(), 1, &pBuf);
+		if (nStatus == NERR_Success) {
+			if (debug) print_debug(L"CreateLocalUser: ", username, L" already exists, updating user: ", username);
+			USER_INFO_1* ui;
+			ui = (USER_INFO_1*)pBuf;
+			ui->usri1_password = const_cast<LPWSTR>(password.c_str());
+			ui->usri1_comment  = const_cast<LPWSTR>(g_RahUserComment.c_str());
+			ui->usri1_flags    = UF_SCRIPT | UF_DONT_EXPIRE_PASSWD;
+			nStatus = NetUserSetInfo(NULL, username.c_str(), 1, (LPBYTE)ui, NULL);
+			if (nStatus == NERR_Success) {
+				if (debug) print_debug(L"CreateLocalUser: User updated successfully: ", username);
+				userSuccess = true;
+			} else {
+				print_error(L"CreateLocalUser: Failed to update user: ", username, L", Error: ", nStatus);
+			}
+			NetApiBufferFree(pBuf);
+			ZeroMemory(&ui, sizeof(ui));
+		} else if (nStatus == NERR_UserNotFound) {
+			if (debug) print_debug(L"CreateLocalUser: User not exists, creating user: ", username);
+			USER_INFO_1 ui;
+			ZeroMemory(&ui, sizeof(ui));
+			ui.usri1_name = const_cast<LPWSTR>(username.c_str());
+			ui.usri1_password = const_cast<LPWSTR>(password.c_str());
+			ui.usri1_priv = USER_PRIV_USER;
+			ui.usri1_home_dir = const_cast<LPWSTR>(profileDir.c_str());
+			ui.usri1_comment = const_cast<LPWSTR>(g_RahUserComment.c_str());
+			ui.usri1_flags = UF_SCRIPT | UF_DONT_EXPIRE_PASSWD;
+			ui.usri1_script_path = NULL;
+			nStatus = NetUserAdd(NULL, 1, (LPBYTE)&ui, NULL);
+			if (nStatus == NERR_Success) {
+				if (debug) print_debug(L"CreateLocalUser: User created successfully: ", username);
+				userSuccess = true;
+			} else {
+				print_error(L"CreateLocalUser: Failed to create user: ", username, L" Error: ", nStatus);
+			}
+			ZeroMemory(&ui, sizeof(ui));
+		} else {
+			print_error(L"CreateLocalUser: Error: ", nStatus);
+		}
+		if (userSuccess) {
+			if (AddUserToAdminsLocalGroup(username)) {
+				if (debug) print_debug(L"CreateLocalUser: Successfully add user: ", username, L" to local administrators group");
+			}
+		}
+		return userSuccess;
+	}
+
+	// PROFILE
+
+		bool CopyDirectoryRecursive(const std::wstring& source, const std::wstring& dest) {
+
+			WIN32_FIND_DATAW findData{};
+			HANDLE hFind = INVALID_HANDLE_VALUE; // init
+
+			DWORD attr = GetFileAttributesW(dest.c_str());
+			if (attr == INVALID_FILE_ATTRIBUTES) {
+				if (!CreateDirectoryW(dest.c_str(), NULL)) {
+					if (GetLastError() != ERROR_ALREADY_EXISTS) {
+						print_error(L"CopyDirectoryRecursive: Failed to create directory");
+						return false;
+					}
+				}
+			}
+
+			std::wstring searchPath = source + L"\\*";
+
+			hFind = FindFirstFileW(searchPath.c_str(), &findData);
+			if (hFind == INVALID_HANDLE_VALUE) {
+				print_error(L"CopyDirectoryRecursive: FindFirstFile failed");
+
+				return false;
+			}
+
+			do {
+				const std::wstring itemName = findData.cFileName;
+
+				if (itemName == L"." || itemName == L"..") continue;
+
+				std::wstring sourcePath = source + L"\\" + itemName;
+				std::wstring destPath = dest + L"\\" + itemName;
+
+				if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+					if (findData.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+						continue;
+					}
+					//Recursion
+					if (!CopyDirectoryRecursive(sourcePath, destPath)) {
+						if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
+						return false;
+					}
+				} else {
+					if (!CopyFileW(sourcePath.c_str(), destPath.c_str(), false)) {
+						print_error((L"CopyDirectoryRecursive: Failed to copy file: " + sourcePath + L" to " + destPath).c_str());
+						if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
+						return false;
+					}
+				}
+			} while (FindNextFileW(hFind, &findData) != 0);
+
+			DWORD err = GetLastError();
+			if (hFind != INVALID_HANDLE_VALUE) FindClose(hFind);
+				if (err != ERROR_NO_MORE_FILES) {
+				  SetLastError(err);
+				  return false;
+			}
+			return true;
+		}
+
+		bool CreateProfileTemplate(const std::wstring& destProfilePath) {
+
+			if (IsFileExists(destProfilePath, L"NTUSER.DAT")) {
+				if (debug) print_debug(L"CreateProfileTemplate:  File NTUSER.DAT exist in profile");
+				return true;
+			} else {
+				if (debug) print_debug(L"CreateProfileTemplate: File NTUSER.DAT not exist in profile ", destProfilePath);
+			}
+
+			wchar_t systemDrive[MAX_PATH] = {0};
+			DWORD len = GetEnvironmentVariableW(L"SystemDrive", systemDrive, MAX_PATH);
+			if (len == 0 || len >= MAX_PATH) {
+				wcscpy_s(systemDrive, L"C:");
+			}
+			std::wstring defaultProfile = std::wstring(systemDrive) + L"\\Users\\Default";
+
+			if (!IsDirectoryExists(defaultProfile)) {
+				print_error(L"CreateProfileTemplate: Default profile does not exist");
+				return false;
+			}
+
+			if (!IsDirectoryExists(destProfilePath)) {
+				if (!CreateDirectoryW(destProfilePath.c_str(), NULL)) {
+					print_error(L"CreateProfileTemplate: Failed to create profile directory");
+					return false;
+				}
+			}
+
+			bool defregcopyed = false;
+			std::wstring srcDat = defaultProfile + L"\\NTUSER.DAT";
+			std::wstring dstDat = destProfilePath + L"\\NTUSER.DAT";
+			std::wstring srcLog = defaultProfile + L"\\NTUSER.DAT.LOG";
+			std::wstring dstLog = destProfilePath + L"\\NTUSER.DAT.LOG";
+			if (CopyFileW(srcDat.c_str(), dstDat.c_str(), false)) {
+				if (debug) print_debug(L"CreateProfileTemplate: Copyed default reg NTUSER.DAT from ", defaultProfile, L" to ", destProfilePath);
+				CopyFileW(srcLog.c_str(), dstLog.c_str(), false);
+				defregcopyed = true;
+			}
+
+			if (!defregcopyed) {
+				if (debug) print_debug(L"Copy default profile recursively from ", defaultProfile, L" to ", destProfilePath);
+				if (!CopyDirectoryRecursive(defaultProfile, destProfilePath)) {
+					print_error(L"CreateProfileTemplate: Failed to copy default profile recursively");
+					return false;
+				}
+			}
+
+			CreateTagFile(destProfilePath, L"$temporary_user$");
+			return true;
+		}
+
+		bool CreateProfileRegistryKey(const std::wstring& userSidW, const std::wstring& profilePath) {
+
+			HKEY hKey = NULL;
+			std::wstring regPath = g_profileRegKey + L"\\" + userSidW;
+
+			LSTATUS res = RegCreateKeyExW(HKEY_LOCAL_MACHINE,regPath.c_str(),0,NULL,REG_OPTION_NON_VOLATILE,KEY_WRITE, NULL, &hKey, NULL);
+			if (res != ERROR_SUCCESS) {
+				print_error(L"CreateProfileRegistryKey: Failed to create/open registry key");
+				return false;
+			}
+
+			res = RegSetValueExW(hKey, L"ProfileImagePath", 0, REG_EXPAND_SZ,(const BYTE*)profilePath.c_str(),(DWORD)((profilePath.length() + 1) * sizeof(wchar_t)));
+			if (res != ERROR_SUCCESS) {
+				print_error(L"CreateProfileRegistryKey: Failed to set ProfileImagePath");
+				RegCloseKey(hKey);
+				return false;
+			}
+
+			DWORD flags = 0;
+			RegSetValueExW(hKey, L"Flags", 0, REG_DWORD, (const BYTE*)&flags, sizeof(flags));
+			RegSetValueExW(hKey, L"State", 0, REG_DWORD, (const BYTE*)&flags, sizeof(flags));
+			DWORD val = 1;
+			RegSetValueExW(hKey, L"IsRahTemporaryUser", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
+			if (g_keepTempUser) {
+				RegSetValueExW(hKey, L"IsKeepedUser", 0, REG_DWORD, (const BYTE*)&val, sizeof(val));
+			}
+			RegCloseKey(hKey);
+
+			return true;
+
+		}
+	// PROFILE
+
+	bool AddToHiddenUserList(const std::wstring& username) {
+		if (username.empty()) return true;
+		HKEY hKey = nullptr;
+		if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, g_userListKey.c_str(), 0, nullptr,REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, &hKey, nullptr) != ERROR_SUCCESS) {
+			print_error(L"AddToHiddenUserList: Failed to open or create UserList registry key");
+			return false;
+		}
+		DWORD val = 0; // 0 = hidden
+		if (RegSetValueExW(hKey, username.c_str(), 0, REG_DWORD, (const BYTE*)&val, sizeof(val)) != ERROR_SUCCESS) {
+			print_error(L"AddToHiddenUserList: Failed to add temporary user to UserList");
+			RegCloseKey(hKey);
+			return false;
+		}
+		RegCloseKey(hKey);
+		return true;
+	}
+
+	// NOTE: Fixed username intentionally — parallel execution with same names not supported.
+
+	bool CreateAndInitializeAutoUser(std::wstring& outUsername, std::wstring& outPassword, bool recursive_fallback = false) {
+
+		std::wstring username, password, profilePath;
+		const std::wstring profileRoot = std::wstring(_wgetenv(L"SystemRoot")) + g_RahTempRootDirPath; //path
+		WCHAR szComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+		DWORD dwSize = ARRAYSIZE(szComputerName);
+		DWORD err;
+		bool doContinueCreateUser = false;
+		bool doUseExistingUser = false;
+
+		if (tempUserNameW.empty()) {
+			username = g_tmpUserPrefix + g_tmpUserPostfix; //Default: g_tmpUserPrefix=L"rah_tmp_", g_tmpUserPostfix=L"user"; 
+			g_keepTempUser = false;
+			g_noWait = false;
+		} else {
+			username = tempUserNameW;
+		}
+
+		profilePath = profileRoot + username;
+		std::wstring userSid;
+
+		LPUSER_INFO_1 tmpInfo = nullptr;
+		if (NetUserGetInfo(NULL, username.c_str(), 1, (LPBYTE*)&tmpInfo) == NERR_Success) {
+
+			// Get existing user SID
+			PSID tSid = nullptr;
+			LPWSTR tSidString = nullptr;
+			std::wstring tUserSid;
+			if (GetSIDFromUsername(&tSid,username)) {
+				if (ConvertSidToStringSidW(tSid, &tSidString)) {
+					tUserSid = tSidString;
+				}
+				LocalFree(tSid);
+				LocalFree(tSidString);
+			}
+			NetApiBufferFree(tmpInfo);
+			
+			// Check registry key value - IsRahTemporaryUser
+			if (!tUserSid.empty()) {
+				if (IsRahTemporaryUser(username)) {
+					AddToHiddenUserList(username);
+					doUseExistingUser = true;
+					userSid = tUserSid;
+				}
+			}
+
+			if (!doUseExistingUser) {
+				if (g_tempuser_fallback) {
+					print_warning(L"CreateAndInitializeAutoUser: User already exists: ", username);
+					//A recursive fallback 
+					if (!recursive_fallback) {
+						tempUserNameW = username + L"_" + GenerateUsernamePostfix(8);
+						print_warning(L"CreateAndInitializeAutoUser: A fallback is to create a temporary user: ", tempUserNameW);
+						if (g_keepTempUser) {
+							print_warning(L"CreateAndInitializeAutoUser: Temporary user keeping is enabled; The fallback mode disables keeping the temporary user for later use");
+							g_keepTempUser = false;
+						}
+						bool rfb = CreateAndInitializeAutoUser(outUsername, outPassword, true);
+						return rfb;
+					}
+				}
+				print_error(L"CreateAndInitializeAutoUser: Failed to create Temporary user becouse user already exists: ", username);
+				return false;
+			}
+
+			if (IsUserLoggedOn(username)) {
+				print_error(L"CreateAndInitializeAutoUser: Failed to use Temporary user becouse user already active: ", username);
+				return false;
+			}
+
+			if (debug) print_debug(L"CreateAndInitializeAutoUser: Using an existing Temporary user: ", username);
+			
+		}
+
+		password = GeneratePassword(dwSize);
+
+		if (debug) {
+			std::wstring first3 = password.substr(0, 3);         
+			std::wstring last3  = password.substr(password.length() - 3); 
+			if (debug) print_debug(L"CreateAndInitializeAutoUser: Temporary user: ", username, L", password: ", first3, L"***", last3);
+			SecureClear(first3);
+			SecureClear(last3);
+		}
+
+		if (doUseExistingUser) {
+			AddToHiddenUserList(username);
+			if (!CreateLocalUser(username, password, profilePath)) {
+				print_error(L"CreateAndInitializeAutoUser: Failed to update existing local user");
+				RemoveFromHiddenUserList(username);
+			} else {
+				if (debug) print_debug(L"CreateAndInitializeAutoUser: Update existing local user: Success");
+				tempUserCreated	= true;
+			}
+			bool doProfileReCreate = false;
+			if (tempUserCreated) {
+				if (!IsDirectoryExists(profilePath)) doProfileReCreate = true;
+				if (!doProfileReCreate) if (!IsDirectoryExists(profilePath + L"\\AppData")) doProfileReCreate = true;
+				if (!doProfileReCreate) if (!IsFileExists(profilePath, L"\\NTUSER.DAT")) doProfileReCreate = true;
+				if (!doProfileReCreate) if (!IsFileExists(profilePath, L"\\ntuser.ini")) doProfileReCreate = true;
+				if (!doProfileReCreate) if (!IsFileExists(profilePath, L"\\$temporary_user$")) doProfileReCreate = true;
+				if (!doProfileReCreate) if (!IsFileExists(profilePath, L"\\AppData\\Local\\Microsoft\\Windows\\UsrClass.dat")) doProfileReCreate = true;
+				if (doProfileReCreate) {
+					if (CreateProfileTemplate(profilePath)) {
+						if (debug) print_debug(L"CreateAndInitializeAutoUser: Update existing local user profile: Success");
+					} else {
+						if (debug) print_debug(L"CreateAndInitializeAutoUser: Failed to update existing local user profile");
+						tempUserCreated	= false;
+					}
+				} else {
+					if (debug) print_debug(L"CreateAndInitializeAutoUser: Using an existing Temporary user profile");
+				}
+			}
+
+		} else {
+			//New user
+			if (!CreateDirectoryW(profileRoot.c_str(), NULL)) {
+				err = GetLastError();
+				if (err != ERROR_ALREADY_EXISTS) {
+					print_error(L"CreateAndInitializeAutoUser: Failed to create Temporary user profile root dir: ", profileRoot);
+					doContinueCreateUser = false;
+				} else if (err == ERROR_ALREADY_EXISTS) {
+					if (debug) print_debug(L"CreateAndInitializeAutoUser: Temporary user profile root dir already exists: ", profileRoot);
+					doContinueCreateUser = true;
+				}
+			} else {
+				doContinueCreateUser = true;
+			}
+
+			if (doContinueCreateUser) {
+
+				if (doContinueCreateUser) {
+					AddToHiddenUserList(username);
+					if (!CreateLocalUser(username, password, profilePath)) {
+						print_error(L"CreateAndInitializeAutoUser: Failed to create local user");
+						RemoveFromHiddenUserList(username);
+						doContinueCreateUser = false;
+					} else {
+						if (debug) print_debug(L"CreateAndInitializeAutoUser: Temporary user profile dir: ", profilePath);
+						doContinueCreateUser = true;
+					}
+				}
+
+				if (doContinueCreateUser) {
+					PSID pSid = nullptr;
+					LPWSTR sidString = nullptr;
+					if (GetSIDFromUsername(&pSid,username)) {
+						if (ConvertSidToStringSidW(pSid, &sidString)) {
+							userSid = sidString;
+							LocalFree(pSid);
+							LocalFree(sidString);
+							if (debug) print_debug(L"CreateAndInitializeAutoUser: User SID: ", userSid);
+							doContinueCreateUser = true;
+						} else {
+							print_error(L"CreateAndInitializeAutoUser: ConvertSidToStringSid failed");
+							if (pSid) LocalFree(pSid);
+							doContinueCreateUser = false;
+						}
+					} else {
+						print_error(L"CreateAndInitializeAutoUser: Failed to get SID for user");
+						doContinueCreateUser = false;
+					}
+				}
+
+				if (doContinueCreateUser) {
+					if (!CreateDirectoryW(profilePath.c_str(), NULL)) {
+						err = GetLastError();
+						if (err != ERROR_ALREADY_EXISTS) {
+							print_error((L"CreateAndInitializeAutoUser: Failed to create Temporary user profile dir: " + profilePath).c_str());
+							doContinueCreateUser = false;
+						} else if (err == ERROR_ALREADY_EXISTS) {
+							if (debug) print_debug(L"CreateAndInitializeAutoUser: Temporary user profile dir already exists: ", profilePath);
+							doContinueCreateUser = true;
+						}
+					} else {
+						doContinueCreateUser = true;
+					}
+				}
+
+				if (doContinueCreateUser) {
+					if (debug) print_debug(L"CreateAndInitializeAutoUser: Preparing profile SID: ", userSid);
+					if (!CreateProfileTemplate(profilePath)) {
+						print_error(L"CreateAndInitializeAutoUser: Failed to create profile template");
+						doContinueCreateUser = false;
+					} else {
+						doContinueCreateUser = true;
+					}
+				}
+				
+				if (doContinueCreateUser) {
+					if (!CreateProfileRegistryKey(userSid, profilePath)) {
+						print_error(L"CreateAndInitializeAutoUser: Failed to create profile registry key");
+						doContinueCreateUser = false;
+					} else {
+						doContinueCreateUser = true;
+					}
+				}
+
+				if (doContinueCreateUser) {
+					tempUserCreated	= true;
+				}
+				
+				if (!tempUserCreated) {
+					print_error(L"CreateAndInitializeAutoUser: Failed to create temporary user. Performing Cleanup...");
+					DeleteTempUserAndProfile(username, userSid, profilePath,false,false,false);
+				}
+
+			}
+
+		}
+
+		if (tempUserCreated) {
+			outUsername			= username;
+			outPassword			= password;
+			tempUserW			= username;
+			tempUserSidW		= userSid;
+			tempUserProfileW	= profilePath;
+		}
+
+		SecureClear(username);
+		SecureClear(password);
+		SecureClear(profilePath);
+		return tempUserCreated;
 	}
 
 	//=================================================================================================================================================================//
@@ -1308,13 +2150,33 @@
 
 	bool IsDomainController() {
 		DSROLE_PRIMARY_DOMAIN_INFO_BASIC* pInfo = nullptr;
-		if (DsRoleGetPrimaryDomainInformation(NULL, DsRolePrimaryDomainInfoBasic, (PBYTE*)&pInfo) == ERROR_SUCCESS) {
-			bool isDC = (pInfo->MachineRole == DsRole_RolePrimaryDomainController ||
-						 pInfo->MachineRole == DsRole_RoleBackupDomainController);
-			DsRoleFreeMemory(pInfo);
-			return isDC;
+		if (DsRoleGetPrimaryDomainInformation( nullptr,DsRolePrimaryDomainInfoBasic,(PBYTE*)&pInfo) != ERROR_SUCCESS || !pInfo) {
+			return false;
 		}
-		return false;
+		bool isDC = (pInfo->MachineRole == DsRole_RolePrimaryDomainController || pInfo->MachineRole == DsRole_RoleBackupDomainController);
+		bool isDsRunning = (pInfo->Flags & DSROLE_PRIMARY_DS_RUNNING) != 0;
+		DsRoleFreeMemory(pInfo);
+		return isDC && isDsRunning;
+	}
+
+	bool IsDomainControllerReg() {
+		HKEY hKey;
+		wchar_t productType[64];
+		DWORD size = sizeof(productType); // размер буфера в байтах
+		bool result = false;
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SYSTEM\\CurrentControlSet\\Control\\ProductOptions",0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS) {
+			return false;
+		}
+		if (RegQueryValueExW(hKey, L"ProductType", nullptr, nullptr,reinterpret_cast<BYTE*>(productType), &size) == ERROR_SUCCESS) {
+			size_t charsRead = size / sizeof(wchar_t);
+			if (charsRead >= _countof(productType)) {
+				charsRead = _countof(productType) - 1;
+			}
+			productType[charsRead] = L'\0';
+			result = (_wcsicmp(productType, L"LanmanNT") == 0);
+		}
+		RegCloseKey(hKey);
+		return result;
 	}
 
 	bool IsRunningAsAdmin() {
@@ -1398,59 +2260,6 @@
 		}
 		return false;
 	}
-
-	//=================================================================================================================================================================//
-	//=================================================================================================================================================================//
-
-	//Not used
-	bool AddLogonRight(const wchar_t* username, const wchar_t* rightName) {
-		LSA_HANDLE policyHandle = nullptr;
-		LSA_OBJECT_ATTRIBUTES objectAttributes = {};
-		NTSTATUS status = LsaOpenPolicy(nullptr, &objectAttributes,
-										POLICY_LOOKUP_NAMES | POLICY_CREATE_ACCOUNT,
-										&policyHandle);
-		if (status != 0) {
-			print_error(L"AddLogonRight: LsaOpenPolicy failed");
-			return false;
-		}
-
-		PSID pSid = nullptr;
-		DWORD sidSize = 0, domainSize = 0;
-		SID_NAME_USE sidType;
-
-		// First call to get buffer sizes
-		LookupAccountNameW(nullptr, username, nullptr, &sidSize, nullptr, &domainSize, &sidType);
-		pSid = (PSID)malloc(sidSize);
-		LPWSTR domainName = (LPWSTR)malloc(domainSize * sizeof(wchar_t));
-
-		if (!LookupAccountNameW(nullptr, username, pSid, &sidSize, domainName, &domainSize, &sidType)) {
-			print_error(L"AddLogonRight: LookupAccountNameW: Failed to lookup account SID");
-			free(pSid);
-			free(domainName);
-			LsaClose(policyHandle);
-			return false;
-		}
-
-		LSA_UNICODE_STRING userRight;
-		userRight.Buffer = const_cast<wchar_t*>(rightName);
-		userRight.Length = (USHORT)wcslen(rightName) * sizeof(wchar_t);
-		userRight.MaximumLength = userRight.Length + sizeof(wchar_t);
-
-		status = LsaAddAccountRights(policyHandle, pSid, &userRight, 1);
-		if (status != 0) {
-			print_error(L"AddLogonRight: LsaAddAccountRights failed");
-			free(pSid);
-			free(domainName);
-			LsaClose(policyHandle);
-			return false;
-		}
-
-		free(pSid);
-		free(domainName);
-		LsaClose(policyHandle);
-		return true;
-	}
-	//Not used
 
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
@@ -1562,14 +2371,12 @@
 		std::wstring fullUserName = domain + L"\\" + userOnly;
 		userSessionId = GetSessionIdByUserName(userOnly,domain);
 		if (userSessionId == 0xFFFFFFFF) {
-			std::wstring msg = std::wstring(L"RunAsInteractive: Unable to get session ID for user ") + fullUserName;
-			print_error(msg.c_str());
+			print_error(L"RunAsInteractive: Unable to get session ID for user ", fullUserName);
 			return false;
 		}
 
 		if (!IsUserInteractiveSession(userSessionId)) {
-			std::wstring msg = std::wstring(L"RunAsInteractive: User ") + fullUserName + L" session " + std::to_wstring(userSessionId) + L" is not interactive";
-			if (debug) print_warning(msg.c_str());
+			if (debug) print_warning(L"RunAsInteractive: User: ", fullUserName, L", session: ", userSessionId, L" is not interactive");
 			//return false; // Process always start in logged user session
 		}
 
@@ -1592,8 +2399,7 @@
 			HANDLE hUserToken = NULL;
 
 			if (!WTSQueryUserToken(userSessionId, &hUserToken)) {
-				std::wstring msg = std::wstring(L"RunAsInteractive: WTSQueryUserToken failed for session ") + std::to_wstring(userSessionId);
-				print_error(msg.c_str());
+				print_error(L"RunAsInteractive: WTSQueryUserToken failed for session: ", userSessionId);
 				SafeCloseHandle(hUserToken);
 				return false;
 			}
@@ -1691,12 +2497,12 @@
 
 		if (debug) print_debug(L"RunUnderSystem:");
 
-		// Если сессия СУЩЕСТВУЕТ и запуск из под системы - для запуска программы в фоне НЕ НУЖЕН ПАРОЛЬ, ЛОГИН, ЗАГРУЗКА ПРОФИЛЯ...
+		// If the session EXISTS and is launched under system, you do not need a password, login, or profile loading to run the program
 			DWORD userSessionId = 0xFFFFFFFF;
 			std::wstring fullUserName = domain + L"\\" + userOnly;
 			userSessionId = GetSessionIdByUserName(userOnly,domain);
 			if (userSessionId != 0xFFFFFFFF) {
-				// Сессия существует — получаем токен пользователя
+				// The session exists - we get the user token
 				if (!WTSQueryUserToken(userSessionId, &hPrimaryToken)) {
 					if (debug) print_debug(L"RunUnderSystem: WTSQueryUserToken failed, fallback to LogonUserW");
 				} else {
@@ -1706,36 +2512,35 @@
 		//
 
 		if (!hPrimaryToken) { // USER IS NOT LOGGED IN
-			if (!LogonUserW(userOnly.c_str(), domain.c_str(), password.c_str(),
-							LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
+			if (!LogonUserW(userOnly.c_str(), domain.c_str(), password.c_str(),LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, &hToken)) {
 				print_error(L"RunUnderSystem: LogonUserW failed");
 				return false;
+			} else {
+				if (debug) print_debug(L"RunUnderSystem: LogonUserW: Token OK: ", hToken);
 			}
-			if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL,
-								  SecurityImpersonation, TokenPrimary, &hPrimaryToken)) {
+			if (!DuplicateTokenEx(hToken, MAXIMUM_ALLOWED, NULL,SecurityImpersonation, TokenPrimary, &hPrimaryToken)) {
 				print_error(L"RunUnderSystem: DuplicateTokenEx failed");
 				SafeCloseHandle(hToken);
 				return false;
+			} else {
+				if (debug) print_debug(L"RunUnderSystem: DuplicateTokenEx: PrimaryToken OK: ", hPrimaryToken);
 			}
 			if (!EnableTokenPrivilege(hPrimaryToken, SE_ASSIGNPRIMARYTOKEN_NAME)) {
 				if (debug) {
-					std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_ASSIGNPRIMARYTOKEN_NAME) failed for target user ") + userOnly;
-					print_warning(msg.c_str());
+					print_warning(L"RunUnderSystem: EnableTokenPrivilege(SE_ASSIGNPRIMARYTOKEN_NAME) for target user: ", userOnly);
 				}
 			}
 			if (!EnableTokenPrivilege(hPrimaryToken, SE_INCREASE_QUOTA_NAME)) {
 				if (debug) {
-					std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_INCREASE_QUOTA_NAME) failed for user ") + userOnly;
-					print_warning(msg.c_str());
+					print_warning(L"RunUnderSystem: EnableTokenPrivilege(SE_INCREASE_QUOTA_NAME) for user: ", userOnly);
 				}
 			}
 			if (!EnableTokenPrivilege(hPrimaryToken, SE_TCB_NAME)) {
 				if (debug) {
-					std::wstring msg = std::wstring(L"RunUnderSystem: EnableTokenPrivilege(SE_TCB_NAME) failed for target user ") + userOnly;
-					print_warning(msg.c_str());
+					print_warning(L"RunUnderSystem: EnableTokenPrivilege(SE_TCB_NAME) for target user: ", userOnly);
 				}
 			}
-			if (debug) {
+			if (privdebug) {
 				print_str(L"------------------------------------------");
 				PrintTokenPrivileges(hToken,userOnly.c_str());
 				print_str(L"------------------------------------------");
@@ -1747,24 +2552,21 @@
 				DWORD perr = GetLastError();
 				if (perr == ERROR_USER_PROFILE_ALREADY_LOADED) {
 					if (debug) {
-						std::wstring msg = std::wstring(L"RunUnderSystem: Profile already loaded or user: ") + userOnly;
-						print_warning(msg.c_str());
+						print_warning(L"RunUnderSystem: Profile already loaded for user: ", userOnly);
 					}
+					profileloaded = true;
 				} 
 				else if (perr == 299 /* ERROR_PARTIAL_COPY */) {
-					if (debug) {
-						std::wstring msg = std::wstring(L"RunUnderSystem: Profile not loaded for user: ") + userOnly;
-						print_warning(msg.c_str());
-					}
+					print_warning(L"RunUnderSystem: Profile not loaded for user: ", userOnly);
 					return false;
 				} else {
-					std::wstring msg = std::wstring(L"RunUnderSystem: LoadUserProfile failed for user: ") + userOnly;
-					print_warning(msg.c_str());
+					print_warning(L"RunUnderSystem: LoadUserProfile failed for user: ", userOnly);
 					SafeCloseHandle(hPrimaryToken);
 					SafeCloseHandle(hToken);
 					return false;
 				}
 			} else {
+				if (debug) print_debug(L"RunUnderSystem: LoadUserProfileW: Profile OK: ", up.hProfile);
 				profileloaded = true;
 			}
 
@@ -1774,6 +2576,8 @@
 				SafeCloseHandle(hPrimaryToken);
 				SafeCloseHandle(hToken);
 				return false;
+			} else {
+				if (debug) print_debug(L"RunUnderSystem: LoadUserProfileW: Environment OK: ", envBlock);
 			}
 		}
 
@@ -1784,7 +2588,7 @@
 
 		if (debug) {
 			print_debug(L"RunUnderSystem: CreateProcess Parameters");
-			std::wcout << L"    runFromGPO flag: " << runFromGPO << L"\n";
+			std::wcout << L"    runFromGPO flag: " << g_runFromGPO << L"\n";
 			std::wcout << L"    hPrimaryToken: " << hPrimaryToken << L"\n";
 			std::wcout << L"    lpApplicationName: " << (LPCVOID)nullptr << L"\n";
 			std::wcout << L"    lpCommandLine: " << cmdLine << L"\n";
@@ -1877,9 +2681,11 @@
 				print_debug(L"RunUnderUser: CreateProcessWithLogonW Success. Pid: ", procPid);
 				HANDLE hProcessToken = NULL;
 				if (OpenProcessToken(pi.hProcess, TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY, &hProcessToken)) {
-					print_str(L"------------------------------------------");
-					PrintTokenPrivileges(hProcessToken,userOnly.c_str());
-					print_str(L"------------------------------------------");
+					if (privdebug) {
+						print_str(L"------------------------------------------");
+						PrintTokenPrivileges(hProcessToken,userOnly.c_str());
+						print_str(L"------------------------------------------");
+					}
 					SafeCloseHandle(hProcessToken);
 				} else {
 					print_error(L"RunUnderUser: OpenProcessToken failed");
@@ -1993,7 +2799,6 @@
 				DWORD exitCode = 0;
 				if (GetExitCodeProcess(g_pi.hProcess, &exitCode) && exitCode == STILL_ACTIVE) {
 					std::wcout << L"[INFO]: Child process still active, terminating forcibly...\n";
-					std::wcout.flush();
 					TerminateProcess(g_pi.hProcess, 1);
 				}
 			}
@@ -2011,7 +2816,6 @@
 				DWORD wait = WaitForSingleObject(g_pi.hProcess, 5000);
 				if (wait == WAIT_TIMEOUT) {
 					std::wcout << L"[INFO]: Child process still active, terminating forcibly...\n";
-					std::wcout.flush();
 					TerminateProcess(g_pi.hProcess, 1);
 				}
 			}
@@ -2065,7 +2869,6 @@
 						//	std::wcout << std::hex << std::showbase << (int)c << L" ";
 						//}
 						//std::wcout << L"\n";
-						//std::wcout.flush();
 
 					// check OEM-codes for "N/A" (0x8D/0x2F/0x84)
 					if (wTitle.size() == 3 && 
@@ -2116,16 +2919,42 @@
 	//=================================================================================================================================================================//
 	//=================================================================================================================================================================//
 
+		bool IsInvalidUsername(const std::wstring& username) {
+			if (username.empty()) return true;
+			const std::wstring illegalChars = L"@/\\!?*=^&<>|'`,;:.\"+[]() 	";
+			if (username.find_first_of(illegalChars) != std::wstring::npos) {
+				return true;
+			}
+			return false;
+		}
+
+		bool IsInvalidDomain(const std::wstring& domain) {
+			if (domain.empty()) return true;
+			const std::wstring illegalChars = L"@/\\!?*=^&<>|'`,;:\"+[]() 	";
+			if (domain.find_first_of(illegalChars) != std::wstring::npos) {
+				return true;
+			}
+			return false;
+		}
+
+	//=================================================================================================================================================================//
+	//=================================================================================================================================================================//
+
 	int wmain(int argc, wchar_t* argv[]) {
 
-		if (argc < 3) {
+		setvbuf(stdout, nullptr, _IONBF, 0);
+		//std::wcout << std::unitbuf;
+
+		if (argc < 2) {
+			print_str(std::wstring(L"RunAsHidden Version: ") + GetFileVersion() + std::wstring(L"\n"));
 			print_help();
-			return 2;
+			return 1;
 		}
 
 		if (!IsRunningAsSystem() && !IsRunningAsAdmin()) {
+			print_str(std::wstring(L"RunAsHidden Version: ") + GetFileVersion());
 			print_error(L"Must be run as administrator or SYSTEM. Terminating.");
-			return 3;
+			return 1;
 		}
 
 		if (IsRunningAsSystem()) isSystem = true;
@@ -2136,7 +2965,6 @@
 		bool readPipe = true;
 		bool verb = false;
 		bool visible = false;
-		bool nowait = false;
 		bool direct = false;
 		bool silent = false;
 		bool autouser = false;
@@ -2166,7 +2994,9 @@
 		DWORD bytesRead;
 		CHAR buffer[4096];
 		std::string prev;
-
+		
+		const DWORD WAIT_PROC_HOURS = WAIT_PROC_HOURS_DEFAULT * 60 * 60 * 1000;
+		DWORD waitResult;
 		DWORD exitCode = 0;
 
 		// Parsing args
@@ -2201,14 +3031,9 @@
 			// helpers extract vals end
 
 			if (arg == L"-h" || arg == L"--help" || arg == L"-?") {
+				print_str(std::wstring(L"RunAsHidden Version: ") + GetFileVersion() + std::wstring(L"\n"));
 				print_help();
-				goto exitmain;
-			}
-
-			if (arg == L"-query-procs" || arg == L"--query-procs") {
-				queryUserProcs = true;
-				has_command = true;
-				break;
+				goto exitmainproc;
 			}
 
 			if (arg == L"-silent" || arg == L"--silent" || arg == L"-s") {
@@ -2220,14 +3045,48 @@
 				debug = true;
 				continue;
 			}
-
-			if (arg == L"-nowait" || arg == L"--nowait" || arg == L"-n") {
-				nowait = true;
+			if (arg == L"-privdebug" || arg == L"--privdebug") {
+				privdebug = true;
 				continue;
 			}
 
 			if (arg == L"-verb" || arg == L"--verb" || arg == L"-verbose" || arg == L"--verbose") {
 				verb = true;
+				continue;
+			}
+
+			if (arg == L"-query-procs" || arg == L"--query-procs") {
+				queryUserProcs = true;
+				has_command = true;
+				continue;
+			}
+
+			if (arg == L"-cleanup" || arg == L"--cleanup") {
+				g_cleanup_mode = true;
+				has_command = true;
+				continue;
+			}
+
+			if (arg == L"-cleanup-all" || arg == L"--cleanup-all") {
+				g_cleanup_mode = true;
+				g_cleanupall_mode = true;
+				has_command = true;
+				continue;
+			}
+			
+			if (arg == L"-cl" || arg == L"--cl") {
+				g_cl_on = true;
+				continue;
+			}
+
+			if (arg == L"-cla" || arg == L"--cla") {
+				g_cl_on = true;
+				g_cla_on = true;
+				continue;
+			}
+
+			if (arg == L"-nowait" || arg == L"--nowait" || arg == L"-n") {
+				g_noWait = true;
 				continue;
 			}
 
@@ -2237,7 +3096,7 @@
 			}
 
 			if (arg == L"-gpo" || arg == L"--gpo") {
-				runFromGPO = true;
+				g_runFromGPO = true;
 				continue;
 			}
 
@@ -2248,7 +3107,7 @@
 					print_error(arg, L" requires a value");
 					SetLastError(2);
 					exitCode = 2;
-					goto exitmain;
+					goto exitmainproc;
 				}
 				continue;
 			}
@@ -2264,7 +3123,24 @@
 			}
 
 			if (arg == L"-keep" || arg == L"--keep" || arg == L"-k") {
-				keepTempUser = true;
+				g_keepTempUser = true;
+				continue;
+			}
+
+			if (arg == L"-nofb" || arg == L"--nofb" || arg == L"-nofallback" || arg == L"--nofallback") {
+				g_tempuser_fallback = false;
+				continue;
+			}
+
+			// custom temporary username
+			if (arg == L"-tn" || arg == L"--tn" || arg == L"-tempusername" || arg == L"--tempusername" ||
+				starts_with(arg, L"-tn=") || starts_with(arg, L"--tn=") || starts_with(arg, L"-tempusername=") || starts_with(arg, L"--tempusername=")) {
+				if (!extract_value(arg, i, tempusername)) {
+					print_error(arg, L" requires a value");
+					SetLastError(2);
+					exitCode = 2;
+					goto exitmainproc;
+				}
 				continue;
 			}
 
@@ -2275,7 +3151,7 @@
 					print_error(arg, L" requires a value");
 					SetLastError(2);
 					exitCode = 2;
-					goto exitmain;
+					goto exitmainproc;
 				}
 				continue;
 			}
@@ -2287,7 +3163,7 @@
 					print_error(arg, L" requires a value");
 					SetLastError(2);
 					exitCode = 2;
-					goto exitmain;
+					goto exitmainproc;
 				}
 				continue;
 			}
@@ -2299,7 +3175,7 @@
 				if (!extract_value_raw(arg, i, command)) {  // trim quotes
 					print_error(arg, L" requires a command string");
 					exitCode = 2;
-					goto exitmain;
+					goto exitmainproc;
 				}
 				has_command = true;
 				continue;
@@ -2308,20 +3184,190 @@
 			// command params
 			if (arg == L"-params" || arg == L"--params" ||
 				starts_with(arg, L"-params=") || starts_with(arg, L"--params=")) {
-
 				if (!extract_value_raw(arg, i, cmdparams)) {  // RAW
 					print_error(arg, L" requires a value");
 					exitCode = 2;
-					goto exitmain;
+					goto exitmainproc;
 				}
 				continue;
 			}
 
 			print_error(L"Unknown or unexpected argument");
-			print_help();
 			SetLastError(1);
 			exitCode = 2;
-			goto exitmain;
+			goto exitmainproc;
+		}
+
+		//1.
+
+		if (!has_command) {
+			print_error(L"Missing required parameters");
+			SetLastError(1);
+			exitCode = 2;
+			goto exitmainproc;
+		}
+
+		//2.
+
+		if (g_cleanup_mode || g_cl_on) {
+			if (IsDomainController()) {
+				print_error(L"Any cleanup mode is incompatible with domain controllers.");
+				SetLastError(1);
+				goto exitmainproc;
+			}
+		}
+
+		if (g_cleanup_mode) {
+			if (!g_cleanupall_mode) {
+				print_str(L"Cleanup mode.");
+			} else {
+				print_str(L"Cleanup all mode.");
+			}
+			CheckAndCleanupOrphanedTempUsers();
+			goto exitmainproc;
+		}
+
+		//3.
+
+		if (!tempusername.empty()) {
+			if (username != L"auto") {
+				print_error(L"Incompatible parameter: -tn can only be used with -u=auto");
+				SetLastError(1);
+				exitCode = 3;
+				goto exitmainproc;
+			}
+			if (tempusername.back() != L'.') {
+				if (tempusername.length() > (size_t)11) {
+					print_error(L"The specified temporary username cannot be longer than 11 characters");
+					SetLastError(1);
+					exitCode = 3;
+					goto exitmainproc;
+				}
+				if (g_keepTempUser) {
+					print_error(L"Incompatible parameter: -k / --keep");
+					SetLastError(1);
+					exitCode = 3;
+					goto exitmainproc;
+				}
+				if (username == L"auto") {
+					if (g_noWait) {
+						print_error(L"Incompatible parameter: -n / -nowait");
+						SetLastError(1);
+						exitCode = 3;
+						goto exitmainproc;
+					}
+				}
+			} else {
+				
+				if (tempusername.length() > (size_t)21) {
+					print_error(L"The specified temporary username cannot be longer than 20 characters");
+					SetLastError(1);
+					exitCode = 3;
+					goto exitmainproc;
+				}
+			}
+		} else {
+			if (username == L"auto") {
+				if (g_noWait) {
+					print_error(L"Incompatible parameter: -n / -nowait");
+					SetLastError(1);
+					exitCode = 3;
+					goto exitmainproc;
+				}
+			}
+			if (g_keepTempUser) {
+				print_error(L"Incompatible parameter: -k / --keep");
+				SetLastError(1);
+				exitCode = 3;
+				goto exitmainproc;
+			}
+		}
+
+		//4.
+
+		// Domain / userOnly
+		domain = L".";
+		userOnly = username;
+		pos = username.find(L'\\');
+		if (pos != std::wstring::npos) {
+			domain = username.substr(0, pos);
+			userOnly = username.substr(pos + 1);
+		} else {
+			pos = username.find(L'@');
+			if (pos != std::wstring::npos) {
+				userOnly = username.substr(0, pos);
+				domain = username.substr(pos + 1);
+			}
+		}
+
+		//5.
+
+		if ( userOnly == L"auto" || userOnly == L"*" ) {
+			if ( password == L"auto" || password == L"*" ) {
+				autouser = true;
+				if ( !tempusername.empty() ) {
+					if (tempusername.back() == L'.') {
+						tempusername.pop_back();
+					} else {
+						tempusername = tempusername + L"_" + GenerateUsernamePostfix(8);
+						g_keepTempUser = false;
+						g_noWait = false;
+					}
+					username = tempusername;
+					tempUserNameW = username;
+					userOnly = username;
+				}
+			} else {
+				print_error(L"Invalid password parameter");
+				SetLastError(1);
+				exitCode = 3;
+				goto exitmainproc;
+			}
+		}
+
+		//6.
+
+		if (IsInvalidUsername(userOnly)) {
+			print_error(L"Invalid user name: contains illegal characters: ", userOnly);
+			SetLastError(1);
+			exitCode = 3;
+			goto exitmainproc;
+		}
+		if (!domain.empty()) {
+			if (IsInvalidDomain(domain)) {
+				print_error(L"Invalid domain name: contains illegal characters: ", domain);
+				SetLastError(1);
+				exitCode = 3;
+				goto exitmainproc;
+			}
+		}
+
+		//7.
+
+		if (IsDomainController()) {
+			if (autouser || visible) {
+				print_error(L"Can not be run on a domain controller in this mode [autouser or visible]");
+				SetLastError(1);
+				exitCode = 3;
+				goto exitmainproc;
+			}
+		}
+
+		//8.
+
+		if (autouser && visible) {
+			print_error(L"Can not be run in this mode [autouser and visible]");
+			SetLastError(1);
+			exitCode = 3;
+			goto exitmainproc;
+		}
+
+
+		if (direct && IsCmdScript(command)) {
+			print_error(L"Direct mode is not allowed for .cmd/.bat");
+			SetLastError(1);
+			exitCode = 3;
+			goto exitmainproc;
 		}
 
 		if (debug) {
@@ -2329,21 +3375,17 @@
 			print_str(L"------------------------------------------");
 		}
 
-		if (!has_command) {
-			print_error(L"Missing required parameters");
-			print_help();
-			SetLastError(1);
-			exitCode = 2;
-			goto exitmain;
-		}
+		if (debug) print_debug(L"Target user to execute: '" + username + L"', Domain: '" + domain + L"', Auto: '" + (autouser ? L"true" : L"false"));
 
-		if (debug) {
-			print_debug(L"User: ", username);
-			print_debug(L"Pass: ***"); // pass not printing
-			print_debug(L"Command: ", command);
-			print_debug(L"Params: ", cmdparams);
-			print_debug(L"Direct run: ", direct);
-			print_debug(L"Is cmd script: ", IsCmdScript(command));
+		if (g_cl_on) { //UNDER CONSTRUCTION
+			g_cleanup_mode = true;
+			if (g_cla_on) {
+				g_cleanupall_mode = true;
+				if (debug) print_str(L"-- Cleanup all before execution command --");
+			} else {
+				if (debug) print_str(L"---- Cleanup before execution command ----");
+			}
+			//CheckAndCleanupOrphanedTempUsers();
 			print_str(L"------------------------------------------");
 		}
 
@@ -2360,44 +3402,23 @@
 			}
 			std::wcout << L"Direct run: " << direct << L"\n";
 			std::wcout << L"Is cmd script: " << IsCmdScript(command) << L"\n";
-			std::wcout.flush();
 		}
 
-		// Domain / userOnly
-		domain = L".";
-		userOnly = username;
-		pos = username.find(L'\\');
-		if (pos != std::wstring::npos) {
-			domain = username.substr(0, pos);
-			userOnly = username.substr(pos + 1);
-		} else {
-			pos = username.find(L'@');
-			if (pos != std::wstring::npos) {
-				userOnly = username.substr(0, pos);
-				domain = username.substr(pos + 1);
+		if (debug) {
+			if ( autouser ) {
+				if ( !tempusername.empty() ) {
+					print_debug(L"User [Spec.tmp]: ", username);
+				} else {
+					print_debug(L"User [Def.tmp]: ", username);
+				}
+			} else {
+				print_debug(L"User: ", username);
 			}
-		}
-		
-		if ( userOnly == L"auto" || userOnly == L"*" ) {
-			if ( password == L"auto" || password == L"*" ) {
-				autouser = true;
-			}
-		}
-
-		if (IsDomainController()) {
-			if (autouser || visible) {
-				print_error(L"RunAsHidden must not be run on a domain controller in this mode. Terminating.");
-				SetLastError(2);
-				exitCode = 2;
-				goto exitmain;
-			}
-		}
-
-		if (autouser && visible) {
-			print_error(L"RunAsHidden must not be run in this mode. Terminating.");
-			SetLastError(2);
-			exitCode = 2;
-			goto exitmain;
+			print_debug(L"Command: ", command);
+			print_debug(L"Params: ", cmdparams);
+			print_debug(L"Direct run: ", direct);
+			print_debug(L"Is cmd script: ", IsCmdScript(command));
+			print_str(L"------------------------------------------");
 		}
 
 		if (!timeoutS.empty()) {
@@ -2406,19 +3427,19 @@
 				timeoutMs = static_cast<DWORD>(std::max(0, t)) * 1000;
 			}
 			catch (const std::exception& e) {
-				print_error(L"Incorrect timeout param: ", timeoutS, L", will be reset to 0");
-				timeoutMs = 0;
+				print_error(L"Incorrect timeout param: ", timeoutS, L", will be reset to 1 sec");
+				timeoutMs = 1000;
 			}
 			if (timeoutMs > 60000) {
-				print_error(L"Incorrect timeout: ", timeoutS, L", will be reset to 0");
-				timeoutMs = 0;
+				print_error(L"Incorrect timeout: ", timeoutS, L", will be reset to 1 sec");
+				timeoutMs = 1000;
 			}
 		}
 
 		// get user procs
 			if (queryUserProcs) {
 				PSID pSid = nullptr;
-				if (GetSIDFromUsername(username, &pSid)) {
+				if (GetSIDFromUsername(&pSid,username)) {
 					auto procs = EnumAllUserProcesses(username);
 
 					// Table header
@@ -2434,25 +3455,22 @@
 								   << std::setw(10) << p.pid
 								   << p.windowTitle << L"\n";
 					}
-					std::wcout.flush();
 
 					LocalFree(pSid);
 				} else {
 					print_error(L"Error GET SID for user.");
 				}
 				exitCode = 0;
-				goto exitmain;
+				goto exitmainproc;
 			}
 		// get user procs end
 
-		//Under Construction
-		srand((unsigned int)time(NULL));
 		if (autouser) {
 			if (debug) print_debug(L"Auto user mode");
 			if (!CreateAndInitializeAutoUser(username, password)) {
 				print_error(L"Automatic create user failed");
 				exitCode = 1;
-				goto exitmain;
+				goto exitmainproc;
 			} else {
 				userOnly = username;
 				if (debug) print_debug(L"Using automatically created temporary user: ", userOnly, L" [", username, L"] with tremporary password");
@@ -2489,8 +3507,8 @@
 			print_debug(L"Target user='", userOnly, L"'");
 			print_debug(L"Visible=", (visible ? L"true" : L"false"));
 			print_debug(L"Command='", command, L"'");
-			if (nowait) {
-				print_debug(L"NoWait");
+			if (g_noWait) {
+				print_debug(L"NoWait=", g_noWait);
 			}
 			if (timeoutMs > 0)	{
 				print_debug(L"Timeout: ", timeoutS);
@@ -2528,6 +3546,8 @@
 				} else {
 					if (debug) print_error(L"Failed to get SYSTEM token");
 				}
+				EnablePrivilege(SE_RESTORE_NAME);
+				EnablePrivilege(SE_BACKUP_NAME);
 			} else {
 				if (debug) print_error(L"Failed to enable SeDebugPrivilege");
 			}
@@ -2541,7 +3561,7 @@
 		}
 
 		//Temporary break
-		//goto exitmain;
+		//goto exitmainproc;
 
 		if (isSystem) {
 			if (debug) print_debug(L"[Call EnableThreadPrivilege]");
@@ -2557,53 +3577,50 @@
 		}
 
 		if (debug) {
-			HANDLE hToken = NULL;
-			if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-				print_str(L"------------------------------------------");
-				print_debug(L"Current Process token privileges:");
-				DWORD len = 0;
-				GetTokenInformation(hToken, TokenPrivileges, nullptr, 0, &len);
-				std::vector<BYTE> buffer(len);
-				TOKEN_PRIVILEGES* tp = (TOKEN_PRIVILEGES*)buffer.data();
-				if (GetTokenInformation(hToken, TokenPrivileges, tp, len, &len)) {
-					for (DWORD i = 0; i < tp->PrivilegeCount; ++i) {
-						LUID_AND_ATTRIBUTES laa = tp->Privileges[i];
-						WCHAR name[256];
-						DWORD size = 256;
-						if (LookupPrivilegeNameW(nullptr, &laa.Luid, name, &size)) {
-							std::wcout << L"    " << name;
-							if (laa.Attributes & SE_PRIVILEGE_ENABLED)
-								std::wcout << L" [ENABLED]";
-							std::wcout << L"\n";
+			if (privdebug) {
+				HANDLE hToken = NULL;
+				if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+						print_str(L"------------------------------------------");
+						print_debug(L"Current Process token privileges:");
+						DWORD len = 0;
+						GetTokenInformation(hToken, TokenPrivileges, nullptr, 0, &len);
+						std::vector<BYTE> buffer(len);
+						TOKEN_PRIVILEGES* tp = (TOKEN_PRIVILEGES*)buffer.data();
+						if (GetTokenInformation(hToken, TokenPrivileges, tp, len, &len)) {
+							for (DWORD i = 0; i < tp->PrivilegeCount; ++i) {
+								LUID_AND_ATTRIBUTES laa = tp->Privileges[i];
+								WCHAR name[256];
+								DWORD size = 256;
+								if (LookupPrivilegeNameW(nullptr, &laa.Luid, name, &size)) {
+									std::wcout << L"    " << name;
+									if (laa.Attributes & SE_PRIVILEGE_ENABLED)
+										std::wcout << L" [ENABLED]";
+									std::wcout << L"\n";
+								}
+							}
 						}
-					}
+						print_str(L"------------------------------------------");
+					SafeCloseHandle(hToken);
+				} else {
+					print_error(L"Failed to open process token to enumerate privileges");
 				}
-				print_str(L"------------------------------------------");
-				SafeCloseHandle(hToken);
-			} else {
-				print_error(L"Failed to open process token to enumerate privileges");
 			}
 
 			if (isImpersonated) {
-				HANDLE hThreadToken = NULL;
-				if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, false, &hThreadToken)) {
-					print_str(L"------------------------------------------");
-					print_debug(L"Current Tread token privileges:");
-					PrintTokenPrivileges(hThreadToken, L"CurrentThread");
-					SafeCloseHandle(hThreadToken);
-					print_str(L"------------------------------------------");
-				} else {
-					print_error(L"OpenThreadToken failed for PrintTokenPrivileges");
+				if (privdebug) {
+					HANDLE hThreadToken = NULL;
+					if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, false, &hThreadToken)) {
+						print_str(L"------------------------------------------");
+						print_debug(L"Current Tread token privileges:");
+						PrintTokenPrivileges(hThreadToken, L"CurrentThread");
+						print_str(L"------------------------------------------");
+						SafeCloseHandle(hThreadToken);
+					} else {
+						print_error(L"OpenThreadToken failed for PrintTokenPrivileges");
+					}
 				}
 			}
 
-		}
-
-		if (direct && IsCmdScript(command)) {
-			print_error(L"Direct mode is not allowed for .cmd/.bat");
-			SetLastError(ERROR_INVALID_PARAMETER);
-			exitCode = 2;
-			goto exitmain;
 		}
 
 		if (direct) {
@@ -2612,8 +3629,8 @@
 			if (!cmdparams.empty())
 				cmdLine += L" " + cmdparams;
 		} else {
-			// cmd.exe /c
-			cmdLine = L"cmd.exe /c \"" + command;
+			// cmd.exe /d /c
+			cmdLine = L"cmd.exe /d /c \"" + command;
 			if (!cmdparams.empty())
 				cmdLine += L" " + cmdparams;
 			cmdLine += L"\"";
@@ -2659,7 +3676,7 @@
 		}
 		si.wShowWindow = SW_HIDE;
 
-		// Ctrl+C - а надо ли это вообще? ну пусть будет
+		// Ctrl+C - Is this even necessary? Well, let it be.
 		if (!SetConsoleCtrlHandler(CtrlHandler, true)) {
 			print_error(L"SetConsoleCtrlHandler failed");
 			SafeCloseHandle(hRead);
@@ -2708,8 +3725,8 @@
 
 		SafeCloseHandle(hWrite);
 
-		if (nowait) {
-			if (debug) print_debug(L"process started successfully [nowait mode], exiting");
+		if (g_noWait) {
+			if (debug) print_debug(L"Process started successfully [nowait mode], exiting.");
 			SafeCloseHandle(hRead);
 			SafeCloseHandle(g_pi.hProcess);
 			SafeCloseHandle(g_pi.hThread);
@@ -2720,7 +3737,7 @@
 		// Read output from process via pipe
 		if (readPipe) {
 			if (debug) {
-				print_str(L"\nCOMMAND RESULTS:\n");
+				print_str(L"\nCOMMAND OUTPUT:\n");
 			}
 			while (true) {
 				BOOL success = ReadFile(hRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL);
@@ -2728,19 +3745,27 @@
 				std::string current(buffer, bytesRead);
 				if (current != prev) {
 					std::cout.write(current.c_str(), current.size());
-					std::cout.flush();
 					prev = current;
 				}
 			}
 			if (debug) {
-				print_str(L"\nCOMMAND RESULTS END.\n");
+				print_str(L"\nCOMMAND OUTPUT END.\n");
 			}
 		}
 		SafeCloseHandle(hRead);
 	 
-		WaitForSingleObject(g_pi.hProcess, INFINITE);
-
-		GetExitCodeProcess(g_pi.hProcess, &exitCode);
+		waitResult = WaitForSingleObject(g_pi.hProcess, WAIT_PROC_HOURS);
+		if (waitResult == WAIT_OBJECT_0) {
+			if (!GetExitCodeProcess(g_pi.hProcess, &exitCode)) {
+				print_error(L"GetExitCodeProcess failed, error: ", GetLastError());
+			}
+		} else {
+			if (waitResult == WAIT_TIMEOUT) {
+				print_error(L"Process execution exceeded ", WAIT_PROC_HOURS_DEFAULT, L" hours limit.");
+			} else {
+				print_error(L"WaitForSingleObject failed, error: ", GetLastError());
+			}
+		}
 
 		SafeCloseHandle(g_pi.hProcess);
 		SafeCloseHandle(g_pi.hThread);
@@ -2757,25 +3782,35 @@
 					Sleep(timeoutMs);
 				}
 
-				if (!nowait) {
+				if (!g_noWait) {
 					if (autouser) {
-						if (!keepTempUser) {
+						if (!g_keepTempUser) {
 							if (tempUserCreated) {
 								std::wcout << L"\n";
-								if (timeoutMs <= 0) Sleep(2500);
-								DeleteUserAndProfile(tempUserW, tempUserSidW, tempUserProfileW);
+								if (IsUserLoggedOn(tempUserW)) {
+									if (debug) print_debug(L"Temporary user processes are still active.");
+								}
+								if (timeoutMs <= 1000) Sleep(1000);
+								DeleteTempUserAndProfile(tempUserW, tempUserSidW, tempUserProfileW);
 								SecureClear(tempUserW);
 								SecureClear(tempUserSidW);
 								SecureClear(tempUserProfileW);
 							}
 						} else {
 							std::wcout << L"\n";
+							UnloadTempUserProfile(tempUserW, tempUserSidW);
 							if (debug) print_debug(L"Temporary user preserved as requested");
 						}
+					} 
+				} else {
+					if (autouser) {
+						if (debug) print_debug(L"Temporary user processes are still active. Temporary user preserved in NoWait mode.");
 					}
 				}
-			ClearSensitiveData(username, userOnly, domain, password, tempusername, temppassword, cmdLine, command, cmdLineBuf);
-			if (debug) print_debug("Process exited with code ", exitCode);
-			return static_cast<int>(exitCode);
-	}
 
+		exitmainproc:
+
+				ClearSensitiveData(username, userOnly, domain, password, tempusername, temppassword, cmdLine, command, cmdLineBuf);
+				if (debug) print_debug("Process exited with code ", exitCode);
+				return static_cast<int>(exitCode);
+	}
