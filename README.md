@@ -31,7 +31,7 @@ RunAsHidden.exe -u <username> -p <password> [options] -c <command>
 | `-n`, `--nowait` | Do not wait for the command to finish.<br> Returns `0` if process started successfully, otherwise `1`.<br> Incompatible with temporary admin user creation (`-u=auto`, `-tn`). |
 | `-t`, `--timeout <seconds>` | Wait the specified time before exiting and/or deleting temporary user.<br> Maximum allowed: **60 seconds**. |
 | `-d`, `--direct` | Run the command directly without `cmd.exe /d /c`.<br> Shell operators like `>`, `|`, `&` are **not interpreted**.<br> Useful for direct execution or capturing output manually. |
-| `-v`, `--visible` | Run the command interactively (window visible) in the active session of the specified user. |
+| `-v`, `--visible` | Run the command interactively (window visible) in the active session of the specified user. Use the -d option to run GUI applications directly. Does not require a password.|
 | `-verb`, `--verbose` | Enable small debug output of command details. |
 | `-debug`, `--debug` | Enable full debug output, diagnostics, and command details. |
 | `-c`, `--command <command>` | Command line to execute. Can include full path.<br> Quotes inside must be escaped with backslash (`\\`). |
@@ -48,6 +48,7 @@ RunAsHidden.exe -u <username> -p <password> [options] -c <command>
 
 ```cmd
 RunAsHidden.exe -u user -p pass -c "whoami"
+RunAsHidden.exe -u=user -p=* -d -v -c "mspaint.exe"
 RunAsHidden.exe -u=domain\\user -p=pass -c "dism.exe /online /get-packages"
 RunAsHidden.exe -u=auto -p=auto -c "\"C:\\Program Files\\app.exe\" -arg1 -arg2"
 RunAsHidden.exe -u=auto -p=auto -c "\"script.cmd\" JJJ \"222\""
